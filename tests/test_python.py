@@ -109,6 +109,128 @@ def test_build_yolo_dataset_hyp_isolated():
     assert cfg.mosaic == DEFAULT_CFG.mosaic
 
 
+def test_face_obb_square_train_and_rectangular_val_shapes(tmp_path):
+    """OBB labels must survive square training and fixed rectangular validation transforms."""
+    images, labels = tmp_path / "images", tmp_path / "labels"
+    images.mkdir()
+    labels.mkdir()
+    cv2.imwrite(str(images / "face.jpg"), np.zeros((480, 640, 3), dtype=np.uint8))
+    (labels / "face.txt").write_text("0 0.25 0.25 0.75 0.25 0.75 0.75 0.25 0.75\n")
+    data = {"names": {0: "face"}, "nc": 1, "channels": 3}
+
+    train_cfg = get_cfg(
+        overrides={
+            "task": "obb",
+            "imgsz": 320,
+            "rect": False,
+            "mosaic": 0.0,
+            "translate": 0.0,
+            "scale": 0.0,
+            "fliplr": 0.0,
+        }
+    )
+    train = data_build.build_yolo_dataset(train_cfg, str(images), batch=1, data=data, mode="train")
+    train_item = train[0]
+    assert train_item["img"].shape == (3, 320, 320) and train_item["bboxes"].shape == (1, 5)
+
+    val_cfg = get_cfg(overrides={"task": "obb", "imgsz": [192, 320], "rect": True})
+    val = data_build.build_yolo_dataset(val_cfg, str(images), batch=1, data=data, mode="val", rect=True)
+    val_item = val[0]
+    assert val_item["img"].shape == (3, 192, 320) and val_item["bboxes"].shape == (1, 5)
+
+
+def test_face_obb_normalization_paths():
+    """Trainer, Validator, and Predictor must share centered RGB normalization without changing the default mode."""
+    from types import SimpleNamespace
+
+    from ultralytics.engine.predictor import BasePredictor
+    from ultralytics.models.yolo.detect.train import DetectionTrainer
+    from ultralytics.models.yolo.detect.val import DetectionValidator
+    from ultralytics.utils import ops
+
+    pixels = torch.tensor([0, 128, 255], dtype=torch.uint8).view(1, 3, 1, 1)
+    expected = torch.tensor([-1.0, 0.0, 127 / 128]).view(1, 3, 1, 1)
+    assert torch.equal(ops.normalize_image(pixels.float(), "minus128_div128"), expected)
+    assert torch.equal(ops.normalize_image(pixels.float(), "scale_255"), pixels.float() / 255)
+
+    trainer = DetectionTrainer.__new__(DetectionTrainer)
+    trainer.device, trainer.stride = torch.device("cpu"), 32
+    trainer.args = SimpleNamespace(input_norm="minus128_div128", multi_scale=0.0)
+    assert torch.equal(trainer.preprocess_batch({"img": pixels.clone()})["img"], expected)
+
+    validator = DetectionValidator.__new__(DetectionValidator)
+    validator.device = torch.device("cpu")
+    validator.args = SimpleNamespace(input_norm="minus128_div128", quantize=None)
+    assert torch.equal(validator.preprocess({"img": pixels.clone()})["img"], expected)
+
+    predictor = BasePredictor.__new__(BasePredictor)
+    predictor.device = torch.device("cpu")
+    predictor.model = SimpleNamespace(fp16=False, input_norm="minus128_div128")
+    predictor.args = SimpleNamespace(input_norm="scale_255")
+    predictor.pre_transform = lambda images: images
+    bgr = np.array([[[0, 128, 255]]], dtype=np.uint8)
+    assert torch.equal(predictor.preprocess([bgr]), expected.flip(1))
+
+
+def test_face_obb_structure_and_rectangular_forward():
+    """Face OBB variants stay sub-1M, attention-free, ReLU-only, and preserve rectangular pyramid shapes."""
+    from ultralytics.nn.modules.block import C2PSA, Attention, PSABlock
+    from ultralytics.nn.modules.conv import Conv
+
+    default_act = type(Conv.default_act)
+    models = [YOLO(f"yolo26{x}-face-obb.yaml") for x in "msn"]
+    assert [sum(p.numel() for p in x.model.parameters()) for x in models] == [862232, 669308, 535778]
+    model = models[0].model
+    assert model.yaml["nc"] == 1 and model.model[-1].reg_max == 1
+    assert not any(
+        isinstance(x, (Attention, C2PSA, PSABlock, torch.nn.SiLU, torch.nn.Softmax, torch.nn.Sigmoid))
+        for x in model.modules()
+    )
+    assert type(Conv.default_act) is default_act
+
+    shapes = []
+    handle = model.model[-1].register_forward_pre_hook(lambda _, inputs: shapes.extend(x.shape[-2:] for x in inputs[0]))
+    model.eval()
+    output = model(torch.rand(1, 3, 192, 320))[0]
+    handle.remove()
+    assert shapes == [torch.Size((24, 40)), torch.Size((12, 20)), torch.Size((6, 10))]
+    assert output.shape == (1, 300, 7) and torch.isfinite(output).all()
+
+    official = YOLO("yolo26n-obb.yaml").model
+    assert any(isinstance(x, torch.nn.SiLU) for x in official.modules())
+
+
+def test_predictor_preserves_explicit_rectangular_shape():
+    """An explicit rectangular predict size must not collapse through minimum-rectangle auto padding."""
+    from types import SimpleNamespace
+
+    from ultralytics.engine.predictor import BasePredictor
+
+    predictor = BasePredictor.__new__(BasePredictor)
+    predictor.imgsz = [192, 320]
+    predictor.args = SimpleNamespace(rect=True)
+    predictor.model = SimpleNamespace(format="pt", dynamic=False, stride=32)
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    assert predictor.pre_transform([image])[0].shape[:2] == (192, 320)
+
+
+def test_face_obb_loss_backward():
+    """The complete end-to-end OBB loss produces finite gradients at the square training size."""
+    model = YOLO("yolo26n-face-obb.yaml").model
+    model.args = get_cfg(overrides={"task": "obb"})
+    model.train()
+    batch = {
+        "img": torch.rand(1, 3, 320, 320),
+        "batch_idx": torch.tensor([0]),
+        "cls": torch.tensor([[0.0]]),
+        "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.25, 0.2]]),
+    }
+    loss, items = model(batch)
+    assert torch.isfinite(loss).all() and all(torch.isfinite(x) for x in items.values())
+    loss.sum().backward()
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+
+
 def test_cfg_rejects_fuzzed_values():
     """Test invalid overrides fail in config validation."""
     with pytest.raises(TypeError, match="degrees"):
