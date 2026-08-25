@@ -108,7 +108,7 @@ class BaseDataset(Dataset):
 
         Args:
             img_path (str | list[str]): Path to the folder containing images or list of image paths.
-            imgsz (int): Image size for resizing.
+            imgsz (int | tuple[int, int]): Image size for resizing as a square side or (height, width).
             cache (bool | str): Cache images to RAM or disk during training.
             augment (bool): If True, data augmentation is applied.
             hyp (dict[str, Any]): Hyperparameters to apply data augmentation.
@@ -125,7 +125,7 @@ class BaseDataset(Dataset):
         """
         super().__init__()
         self.img_path = img_path
-        self.imgsz = imgsz
+        self.imgsz = tuple(imgsz) if isinstance(imgsz, (list, tuple)) else imgsz
         self.augment = augment
         self.single_cls = single_cls
         self.prefix = prefix
@@ -266,19 +266,20 @@ class BaseDataset(Dataset):
                 raise FileNotFoundError(f"Image Not Found {f}")
 
             h0, w0 = im.shape[:2]  # orig hw
-            if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
+            target_h, target_w = self.imgsz if isinstance(self.imgsz, tuple) else (self.imgsz, self.imgsz)
+            if rect_mode:  # fit image within target shape while maintaining aspect ratio
                 if resize_short:  # resize short side to imgsz while maintaining aspect ratio
-                    r = self.imgsz / min(h0, w0)  # ratio
+                    r = max(target_h / h0, target_w / w0)  # ratio
                     if r != 1:  # if sizes are not equal
-                        w, h = (math.ceil(w0 * r), self.imgsz) if h0 < w0 else (self.imgsz, math.ceil(h0 * r))
+                        w, h = math.ceil(w0 * r), math.ceil(h0 * r)
                         im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
                 else:
-                    r = self.imgsz / max(h0, w0)  # ratio
+                    r = min(target_h / h0, target_w / w0)  # ratio
                     if r != 1:  # if sizes are not equal
-                        w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+                        w, h = min(math.ceil(w0 * r), target_w), min(math.ceil(h0 * r), target_h)
                         im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
-                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+            elif (h0, w0) != (target_h, target_w):
+                im = cv2.resize(im, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
             if im.ndim == 2:
                 im = im[..., None]
 
@@ -405,7 +406,11 @@ class BaseDataset(Dataset):
             elif mini > 1:
                 shapes[i] = [1, 1 / mini]
 
-        self.batch_shapes = np.ceil(np.array(shapes) * self.imgsz / self.stride + self.pad).astype(int) * self.stride
+        self.batch_shapes = (
+            np.tile(self.imgsz, (nb, 1))
+            if isinstance(self.imgsz, tuple)
+            else np.ceil(np.array(shapes) * self.imgsz / self.stride + self.pad).astype(int) * self.stride
+        )
         self.batch = bi  # batch index of image
 
     def __getitem__(self, index: int) -> dict[str, Any]:

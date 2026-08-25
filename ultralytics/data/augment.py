@@ -2770,7 +2770,7 @@ class RandomLoadText(BaseTransform):
         return labels
 
 
-def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
+def v8_transforms(dataset, imgsz: int | tuple[int, int], hyp: IterableSimpleNamespace):
     """Apply a series of image transformations for training.
 
     This function creates a composition of image augmentation techniques to prepare images for YOLO training. It
@@ -2778,7 +2778,7 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
 
     Args:
         dataset (Dataset): The dataset object containing image data and annotations.
-        imgsz (int): The target image size for resizing.
+        imgsz (int | tuple[int, int]): The target image size as a square side or (height, width).
         hyp (IterableSimpleNamespace): A namespace of hyperparameters controlling various aspects of the
             transformations.
 
@@ -2809,14 +2809,16 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
         >>> hyp.augmentations = augmentations
         >>> transforms = v8_transforms(dataset, imgsz=640, hyp=hyp)
     """
-    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
+    shape = (imgsz, imgsz) if isinstance(imgsz, int) else tuple(imgsz)
+    mosaic_imgsz = max(shape)
+    mosaic = Mosaic(dataset, imgsz=mosaic_imgsz, p=hyp.mosaic)
     affine = RandomPerspective(
         degrees=hyp.degrees,
         translate=hyp.translate,
         scale=hyp.scale,
         shear=hyp.shear,
         perspective=hyp.perspective,
-        size=(imgsz, imgsz),
+        size=shape[::-1],
         preserve_obb=getattr(dataset, "use_obb", False),
     )
 
@@ -2827,7 +2829,7 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
         pre_transform.append(
             CopyPaste(
                 dataset,
-                pre_transform=Compose([Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic), affine]),
+                pre_transform=Compose([Mosaic(dataset, imgsz=mosaic_imgsz, p=hyp.mosaic), affine]),
                 p=hyp.copy_paste,
                 mode=hyp.copy_paste_mode,
             )

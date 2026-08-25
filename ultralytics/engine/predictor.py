@@ -178,7 +178,7 @@ class BasePredictor:
         im = im.to(self.device)
         im = im.half() if self.model.fp16 else im.float()  # uint8 to fp16/32
         if not_tensor:
-            im /= 255  # 0 - 255 to 0.0 - 1.0
+            im = ops.normalize_image(im, getattr(self.model, "input_norm", self.args.input_norm))
         return im
 
     def inference(self, im: torch.Tensor, *args, **kwargs):
@@ -211,6 +211,7 @@ class BasePredictor:
             self.imgsz,
             auto=same_shapes
             and self.args.rect
+            and self.imgsz[0] == self.imgsz[1]
             and (self.model.format == "pt" or (getattr(self.model, "dynamic", False) and self.model.format != "imx")),
             stride=self.model.stride,
         )
@@ -436,6 +437,8 @@ class BasePredictor:
 
         self.device = self.model.device  # update device
         self.args.quantize = 16 if self.model.fp16 else None  # record actual inference precision
+        if hasattr(self.model, "input_norm"):
+            self.args.input_norm = self.model.input_norm
         if hasattr(self.model, "imgsz") and not getattr(self.model, "dynamic", False):
             self.args.imgsz = self.model.imgsz  # reuse imgsz from export metadata
         self.model.eval()

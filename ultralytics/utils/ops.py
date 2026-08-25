@@ -17,6 +17,15 @@ from ultralytics.utils.checks import check_version
 from ultralytics.utils.torch_utils import get_torch_device_backend
 
 
+def normalize_image(image: torch.Tensor, mode: str = "scale_255") -> torch.Tensor:
+    """Normalize a floating-point image tensor using the selected input convention."""
+    if mode == "scale_255":
+        return image.div_(255)
+    if mode == "minus128_div128":
+        return image.sub_(128).div_(128)
+    raise ValueError(f"Unsupported input_norm='{mode}'. Use 'scale_255' or 'minus128_div128'.")
+
+
 class Profile(contextlib.ContextDecorator):
     """Ultralytics Profile class for timing code execution.
 
