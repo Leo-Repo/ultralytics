@@ -41,6 +41,15 @@ model = YOLO("yolo26m-face-obb.yaml")
 model.train(data="face-obb.yaml", imgsz=320, rect=False, degrees=180, epochs=100)
 ```
 
+At `320×320`, the P3/P4/P5 grids contain 2,100 locations (`40×40 + 20×20 + 10×10`). Rectangular
+`192×320` training contains 1,260 locations (`24×40 + 12×20 + 6×10`), so its convolutional work and activation
+memory are approximately 60% of square training while parameters remain unchanged. The rectangular shape also reduces
+padding for landscape sources close to the deployment aspect ratio, but makes faces smaller for squarer or portrait
+sources and crops more content during large-angle rotation augmentation. Square training is therefore the safer default
+for arbitrary-roll robustness. Remove `train_imgsz: 320` from the model YAML to run a controlled rectangular-training
+experiment with `imgsz=[192, 320]`; compare both checkpoints at the fixed deployment shape on the same source-separated
+validation set.
+
 The deployment input is `N×3×192×320` (height×width). Run a separate deployment-shape validation because square
 training adds more vertical LetterBox padding and therefore does not guarantee identical accuracy at the rectangular
 inference shape.
@@ -58,11 +67,12 @@ using the same normalization convention.
 ## Export and audit ONNX
 
 ```python
-onnx_path = model.export(format="onnx", imgsz=[192, 320], batch=1, dynamic=False)
+onnx_path = model.export(format="onnx", imgsz=[192, 320], batch=1, dynamic=False, opset=11)
 ```
 
-The fixed ONNX input is `[1, 3, 192, 320]`. The exported metadata records `input_norm=minus128_div128`; consumers that
-do not read Ultralytics metadata must apply this preprocessing themselves. Audit the exported graph with:
+The model YAML also defaults ONNX-based export to opset 11. The fixed ONNX input is `[1, 3, 192, 320]`. The exported
+metadata records `input_norm=minus128_div128`; consumers that do not read Ultralytics metadata must apply this
+preprocessing themselves. Audit the exported graph with:
 
 ```bash
 python tools/inspect_onnx_ops.py path/to/best.onnx

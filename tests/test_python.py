@@ -181,7 +181,7 @@ def test_face_obb_structure_and_rectangular_forward():
     models = [YOLO(f"yolo26{x}-face-obb.yaml") for x in "msn"]
     assert [sum(p.numel() for p in x.model.parameters()) for x in models] == [862232, 669308, 535778]
     model = models[0].model
-    assert model.yaml["nc"] == 1 and model.model[-1].reg_max == 1
+    assert model.yaml["nc"] == 1 and model.model[-1].reg_max == 1 and model.yaml["opset"] == 11
     assert not any(
         isinstance(x, (Attention, C2PSA, PSABlock, torch.nn.SiLU, torch.nn.Softmax, torch.nn.Sigmoid))
         for x in model.modules()

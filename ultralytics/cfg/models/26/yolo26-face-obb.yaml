@@ -13,6 +13,7 @@ imgsz: [192, 320] # height, width
 rect: False
 train_imgsz: 320
 input_norm: minus128_div128
+opset: 11
 scales:
   # [depth, width, max_channels]
   n: [0.50, 0.1000, 1024]

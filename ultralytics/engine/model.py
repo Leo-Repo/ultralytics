@@ -749,6 +749,7 @@ class Model(torch.nn.Module):
 
         custom = {
             "imgsz": self.model.yaml.get("imgsz", self.model.args["imgsz"]),
+            "opset": self.model.yaml.get("opset", self.model.args["opset"]),
             "batch": 1,
             "data": None,
             "device": None,  # reset to avoid multi-GPU errors
