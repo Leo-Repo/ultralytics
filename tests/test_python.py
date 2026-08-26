@@ -109,8 +109,8 @@ def test_build_yolo_dataset_hyp_isolated():
     assert cfg.mosaic == DEFAULT_CFG.mosaic
 
 
-def test_face_obb_square_train_and_rectangular_val_shapes(tmp_path):
-    """OBB labels must survive square training and fixed rectangular validation transforms."""
+def test_face_obb_rectangular_train_and_val_shapes(tmp_path):
+    """OBB labels must survive fixed rectangular training and validation transforms."""
     images, labels = tmp_path / "images", tmp_path / "labels"
     images.mkdir()
     labels.mkdir()
@@ -121,7 +121,7 @@ def test_face_obb_square_train_and_rectangular_val_shapes(tmp_path):
     train_cfg = get_cfg(
         overrides={
             "task": "obb",
-            "imgsz": 320,
+            "imgsz": [192, 320],
             "rect": False,
             "mosaic": 0.0,
             "translate": 0.0,
@@ -131,7 +131,7 @@ def test_face_obb_square_train_and_rectangular_val_shapes(tmp_path):
     )
     train = data_build.build_yolo_dataset(train_cfg, str(images), batch=1, data=data, mode="train")
     train_item = train[0]
-    assert train_item["img"].shape == (3, 320, 320) and train_item["bboxes"].shape == (1, 5)
+    assert train_item["img"].shape == (3, 192, 320) and train_item["bboxes"].shape == (1, 5)
 
     val_cfg = get_cfg(overrides={"task": "obb", "imgsz": [192, 320], "rect": True})
     val = data_build.build_yolo_dataset(val_cfg, str(images), batch=1, data=data, mode="val", rect=True)
@@ -215,12 +215,12 @@ def test_predictor_preserves_explicit_rectangular_shape():
 
 
 def test_face_obb_loss_backward():
-    """The complete end-to-end OBB loss produces finite gradients at the square training size."""
+    """The complete end-to-end OBB loss produces finite gradients at the rectangular training size."""
     model = YOLO("yolo26n-face-obb.yaml").model
     model.args = get_cfg(overrides={"task": "obb"})
     model.train()
     batch = {
-        "img": torch.rand(1, 3, 320, 320),
+        "img": torch.rand(1, 3, 192, 320),
         "batch_idx": torch.tensor([0]),
         "cls": torch.tensor([[0.0]]),
         "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.25, 0.2]]),

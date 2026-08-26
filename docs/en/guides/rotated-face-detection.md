@@ -31,28 +31,24 @@ sequence before training to prevent leakage between train and validation sets.
 
 ## Train and validate
 
-Training uses square `320×320` batches so the existing square augmentation pipeline remains available. Use
-`degrees=180` for arbitrary in-plane rotation and inspect augmented labels before a full run.
+Training uses the deployment shape `320×192` (width×height). Use `degrees=180` for arbitrary in-plane rotation and
+inspect augmented labels for clipping before a full run.
 
 ```python
 from ultralytics import YOLO
 
 model = YOLO("yolo26m-face-obb.yaml")
-model.train(data="face-obb.yaml", imgsz=320, rect=False, degrees=180, epochs=100)
+model.train(data="face-obb.yaml", imgsz=[192, 320], rect=False, degrees=180, epochs=100)
 ```
 
-At `320×320`, the P3/P4/P5 grids contain 2,100 locations (`40×40 + 20×20 + 10×10`). Rectangular
-`192×320` training contains 1,260 locations (`24×40 + 12×20 + 6×10`), so its convolutional work and activation
-memory are approximately 60% of square training while parameters remain unchanged. The rectangular shape also reduces
-padding for landscape sources close to the deployment aspect ratio, but makes faces smaller for squarer or portrait
-sources and crops more content during large-angle rotation augmentation. Square training is therefore the safer default
-for arbitrary-roll robustness. Remove `train_imgsz: 320` from the model YAML to run a controlled rectangular-training
-experiment with `imgsz=[192, 320]`; compare both checkpoints at the fixed deployment shape on the same source-separated
-validation set.
+At `192×320`, the P3/P4/P5 grids contain 1,260 locations (`24×40 + 12×20 + 6×10`), compared with 2,100 at
+`320×320`. Rectangular training therefore uses approximately 60% of the convolutional work and activation memory while
+keeping the parameter count unchanged. It also matches deployment preprocessing and reduces padding for landscape
+sources. The tradeoff is increased clipping during large-angle rotation augmentation and smaller faces when squarer or
+portrait source images are fitted into the landscape canvas. Include those source types in validation and inspect
+recall by face size and rotation angle.
 
-The deployment input is `N×3×192×320` (height×width). Run a separate deployment-shape validation because square
-training adds more vertical LetterBox padding and therefore does not guarantee identical accuracy at the rectangular
-inference shape.
+The deployment input is `N×3×192×320` (height×width). Validate at the same fixed shape:
 
 ```python
 model = YOLO("path/to/best.pt")

@@ -11,7 +11,6 @@ activation: torch.nn.ReLU()
 scale: m
 imgsz: [192, 320] # height, width
 rect: False
-train_imgsz: 320
 input_norm: minus128_div128
 opset: 11
 scales:
