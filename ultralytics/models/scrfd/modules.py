@@ -180,7 +180,7 @@ class PAFPN(nn.Module):
 
 
 class Scale(nn.Module):
-    """Learnable scalar matching mmcv.cnn.Scale."""
+    """Learnable scalar used by the official SCRFD regression head."""
 
     def __init__(self):
         super().__init__()
