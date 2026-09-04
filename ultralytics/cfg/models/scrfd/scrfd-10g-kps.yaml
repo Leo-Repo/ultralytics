@@ -1,0 +1,22 @@
+nc: 1
+kpt_shape: [5, 3]
+
+backbone:
+    type: ResNetV1e
+    block: BasicBlock
+    stage_blocks: [3, 4, 2, 3]
+    stage_planes: [56, 88, 88, 224]
+    base_channels: 56
+
+neck:
+    in_channels: [56, 88, 88, 224]
+    out_channels: 56
+
+head:
+    stacked_convs: 3
+    feat_channels: 80
+    norm: BN
+    dw_conv: false
+    use_kps: true
+    strides_share: false
+    scale_mode: 2

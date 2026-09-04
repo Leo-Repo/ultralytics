@@ -1,0 +1,19 @@
+nc: 1
+
+backbone:
+    type: MobileNetV1
+    stage_blocks: [2, 3, 2, 6]
+    stage_planes: [16, 16, 40, 72, 152, 288]
+
+neck:
+    in_channels: [40, 72, 152, 288]
+    out_channels: 16
+
+head:
+    stacked_convs: 2
+    feat_channels: 64
+    norm: 16
+    dw_conv: true
+    use_kps: false
+    strides_share: true
+    scale_mode: 2

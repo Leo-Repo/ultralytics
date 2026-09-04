@@ -70,7 +70,13 @@ class YOLO(Model):
             verbose (bool): Display model info on load.
         """
         path = Path(model if isinstance(model, (str, Path)) else "")
-        if "-world" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:  # if YOLOWorld PyTorch model
+        if "scrfd" in path.stem.lower() and path.suffix in {".pt", ".yaml", ".yml"}:
+            from ultralytics.models.scrfd import SCRFD
+
+            new_instance = SCRFD(path, verbose=verbose)
+            self.__class__ = type(new_instance)
+            self.__dict__ = new_instance.__dict__
+        elif "-world" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:  # if YOLOWorld PyTorch model
             new_instance = YOLOWorld(path, verbose=verbose)
             self.__class__ = type(new_instance)
             self.__dict__ = new_instance.__dict__
@@ -86,6 +92,12 @@ class YOLO(Model):
                 from ultralytics import RTDETR
 
                 new_instance = RTDETR(self)
+                self.__class__ = type(new_instance)
+                self.__dict__ = new_instance.__dict__
+            elif "SCRFD" in (head or BaseBackend.read_metadata(self.model).get("head", "")):
+                from ultralytics.models.scrfd import SCRFD
+
+                new_instance = SCRFD(self)
                 self.__class__ = type(new_instance)
                 self.__dict__ = new_instance.__dict__
 

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import random
 import shutil
 from collections import defaultdict
@@ -21,6 +22,110 @@ from ultralytics.utils import ASSETS_URL, DATASETS_DIR, LOGGER, NUM_THREADS, TQD
 from ultralytics.utils.checks import check_file
 from ultralytics.utils.downloads import download, zip_directory
 from ultralytics.utils.files import increment_path
+
+
+def convert_retinaface(label_file, images_dir, output_dir, split="train", max_images=0, use_keypoints=True):
+    """Convert InsightFace RetinaFace/SCRFD labels to an Ultralytics face dataset.
+
+    Args:
+        label_file (str | Path): InsightFace ``label.txt`` or SCRFD ``labelv2.txt`` annotation file.
+        images_dir (str | Path): Directory containing images referenced by the annotation file.
+        output_dir (str | Path): Destination dataset directory.
+        split (str): Dataset split name such as ``train`` or ``val``.
+        max_images (int): Maximum images to convert, or zero for all images.
+        use_keypoints (bool): Include the five facial landmarks for SCRFD-KPS training.
+
+    Returns:
+        (Path): Generated dataset YAML path.
+    """
+    label_file, images_dir, output_dir = Path(label_file), Path(images_dir), Path(output_dir)
+    records, current = [], None
+    for raw_line in label_file.read_text().splitlines():
+        line = raw_line.strip()
+        if line.startswith("#"):
+            if current:
+                records.append(current)
+                if max_images and len(records) >= max_images:
+                    break
+            fields = line[1:].strip().split()
+            current = {
+                "file": fields[0],
+                "shape": tuple(map(int, fields[1:3])) if len(fields) >= 3 else None,
+                "faces": [],
+            }
+        elif line and current is not None:
+            current["faces"].append([float(x) for x in line.split()])
+    if current and (not max_images or len(records) < max_images):
+        records.append(current)
+    if not records:
+        raise ValueError(f"No image records found in {label_file}")
+
+    image_root = output_dir / "images" / split
+    label_root = output_dir / "labels" / split
+    converted = 0
+    for record in TQDM(records, desc=f"Converting RetinaFace {split}"):
+        image_path = images_dir / record["file"]
+        if not image_path.is_file():
+            LOGGER.warning(f"Skipping missing image {image_path}")
+            continue
+        destination_image = image_root / record["file"]
+        destination_image.parent.mkdir(parents=True, exist_ok=True)
+        if not destination_image.exists():
+            try:
+                os.link(image_path, destination_image)
+            except OSError:
+                shutil.copy2(image_path, destination_image)
+        if record["shape"]:
+            width, height = record["shape"]
+        else:
+            image = cv2.imread(str(image_path))
+            if image is None:
+                LOGGER.warning(f"Skipping unreadable image {image_path}")
+                continue
+            height, width = image.shape[:2]
+        rows = []
+        for face in record["faces"]:
+            if len(face) < 4:
+                continue
+            x, y, a, b = face[:4]
+            if record["shape"]:  # SCRFD labelv2 stores xyxy; InsightFace label.txt stores xywh.
+                x2, y2 = a, b
+            else:
+                x2, y2 = x + a, y + b
+            x, y, x2, y2 = max(x, 0), max(y, 0), min(x2, width), min(y2, height)
+            if x2 <= x or y2 <= y:
+                continue
+            row = [0, (x + x2) / (2 * width), (y + y2) / (2 * height), (x2 - x) / width, (y2 - y) / height]
+            if use_keypoints:
+                landmarks = face[4:19] if len(face) >= 19 else [-1.0] * 15
+                for px, py, visibility in zip(landmarks[0::3], landmarks[1::3], landmarks[2::3]):
+                    valid = px >= 0 and py >= 0 and visibility >= 0
+                    row.extend(
+                        (
+                            min(max(px / width, 0), 1) if valid else 0,
+                            min(max(py / height, 0), 1) if valid else 0,
+                            int(valid),
+                        )
+                    )
+            rows.append(" ".join(f"{value:g}" for value in row))
+        destination = label_root / Path(record["file"]).with_suffix(".txt")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("\n".join(rows) + ("\n" if rows else ""))
+        converted += 1
+
+    yaml_path = output_dir / "retinaface.yaml"
+    data = YAML.load(yaml_path) if yaml_path.exists() else {"path": str(output_dir.resolve())}
+    data.update({split: f"images/{split}", "names": {0: "face"}})
+    if use_keypoints:
+        data.update({"kpt_shape": [5, 3], "flip_idx": [1, 0, 2, 4, 3]})
+    else:
+        data.pop("kpt_shape", None)
+        data.pop("flip_idx", None)
+    if split == "train":
+        data.setdefault("val", f"images/{split}")
+    YAML.save(yaml_path, data)
+    LOGGER.info(f"Converted {converted} RetinaFace images to {yaml_path}")
+    return yaml_path
 
 
 def coco91_to_coco80_class() -> list[int]:
