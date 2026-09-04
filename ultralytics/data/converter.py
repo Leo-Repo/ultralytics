@@ -24,8 +24,8 @@ from ultralytics.utils.downloads import download, zip_directory
 from ultralytics.utils.files import increment_path
 
 
-def convert_retinaface(label_file, images_dir, output_dir, split="train", max_images=0):
-    """Convert InsightFace RetinaFace/SCRFD labels to an Ultralytics five-keypoint pose dataset.
+def convert_retinaface(label_file, images_dir, output_dir, split="train", max_images=0, use_keypoints=True):
+    """Convert InsightFace RetinaFace/SCRFD labels to an Ultralytics face dataset.
 
     Args:
         label_file (str | Path): InsightFace ``label.txt`` or SCRFD ``labelv2.txt`` annotation file.
@@ -33,6 +33,7 @@ def convert_retinaface(label_file, images_dir, output_dir, split="train", max_im
         output_dir (str | Path): Destination dataset directory.
         split (str): Dataset split name such as ``train`` or ``val``.
         max_images (int): Maximum images to convert, or zero for all images.
+        use_keypoints (bool): Include the five facial landmarks for SCRFD-KPS training.
 
     Returns:
         (Path): Generated dataset YAML path.
@@ -95,16 +96,17 @@ def convert_retinaface(label_file, images_dir, output_dir, split="train", max_im
             if x2 <= x or y2 <= y:
                 continue
             row = [0, (x + x2) / (2 * width), (y + y2) / (2 * height), (x2 - x) / width, (y2 - y) / height]
-            landmarks = face[4:19] if len(face) >= 19 else [-1.0] * 15
-            for px, py, visibility in zip(landmarks[0::3], landmarks[1::3], landmarks[2::3]):
-                valid = px >= 0 and py >= 0 and visibility >= 0
-                row.extend(
-                    (
-                        min(max(px / width, 0), 1) if valid else 0,
-                        min(max(py / height, 0), 1) if valid else 0,
-                        int(valid),
+            if use_keypoints:
+                landmarks = face[4:19] if len(face) >= 19 else [-1.0] * 15
+                for px, py, visibility in zip(landmarks[0::3], landmarks[1::3], landmarks[2::3]):
+                    valid = px >= 0 and py >= 0 and visibility >= 0
+                    row.extend(
+                        (
+                            min(max(px / width, 0), 1) if valid else 0,
+                            min(max(py / height, 0), 1) if valid else 0,
+                            int(valid),
+                        )
                     )
-                )
             rows.append(" ".join(f"{value:g}" for value in row))
         destination = label_root / Path(record["file"]).with_suffix(".txt")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +115,12 @@ def convert_retinaface(label_file, images_dir, output_dir, split="train", max_im
 
     yaml_path = output_dir / "retinaface.yaml"
     data = YAML.load(yaml_path) if yaml_path.exists() else {"path": str(output_dir.resolve())}
-    data.update({split: f"images/{split}", "names": {0: "face"}, "kpt_shape": [5, 3], "flip_idx": [1, 0, 2, 4, 3]})
+    data.update({split: f"images/{split}", "names": {0: "face"}})
+    if use_keypoints:
+        data.update({"kpt_shape": [5, 3], "flip_idx": [1, 0, 2, 4, 3]})
+    else:
+        data.pop("kpt_shape", None)
+        data.pop("flip_idx", None)
     if split == "train":
         data.setdefault("val", f"images/{split}")
     YAML.save(yaml_path, data)

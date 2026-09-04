@@ -15,3 +15,7 @@ keywords: Ultralytics, ultralytics.models.scrfd.train, API reference, YOLO, Pyth
 ## ::: ultralytics.models.scrfd.train.SCRFDTrainer
 
 <br><br>
+
+## ::: ultralytics.models.scrfd.train.SCRFDPoseTrainer
+
+<br><br>

@@ -28,6 +28,10 @@ keywords: Ultralytics, ultralytics.models.scrfd.modules, API reference, YOLO, Py
 
 <br><br><hr><br>
 
+## ::: ultralytics.models.scrfd.modules.Bottleneck
+
+<br><br><hr><br>
+
 ## ::: ultralytics.models.scrfd.modules.ResNetV1e
 
 <br><br><hr><br>

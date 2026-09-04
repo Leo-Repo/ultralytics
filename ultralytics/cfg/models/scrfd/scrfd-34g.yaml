@@ -1,0 +1,21 @@
+nc: 1
+
+backbone:
+    type: ResNetV1e
+    block: Bottleneck
+    stage_blocks: [17, 16, 2, 8]
+    stage_planes: [56, 56, 144, 184]
+    base_channels: 56
+
+neck:
+    in_channels: [224, 224, 576, 736]
+    out_channels: 128
+
+head:
+    stacked_convs: 2
+    feat_channels: 256
+    norm: 32
+    dw_conv: false
+    use_kps: false
+    strides_share: true
+    scale_mode: 2

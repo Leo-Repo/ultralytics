@@ -15,3 +15,7 @@ keywords: Ultralytics, ultralytics.models.scrfd.predict, API reference, YOLO, Py
 ## ::: ultralytics.models.scrfd.predict.SCRFDPredictor
 
 <br><br>
+
+## ::: ultralytics.models.scrfd.predict.SCRFDPosePredictor
+
+<br><br>

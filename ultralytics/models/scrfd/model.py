@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from ultralytics.engine.model import Model
-from ultralytics.nn.tasks import BaseModel
+from ultralytics.nn.tasks import BaseModel, yaml_model_load
 from ultralytics.utils import LOGGER
 
 from .loss import SCRFDCriterion
@@ -50,9 +50,15 @@ class SCRFD(Model):
     """
 
     def __init__(self, model: str | Path | Model = "scrfd-500m-kps.yaml", verbose: bool = False):
-        super().__init__(model=model, task="pose", verbose=verbose)
+        task = model.task if isinstance(model, Model) else None
+        if task is None and Path(model).suffix in {".yaml", ".yml"}:
+            task = "pose" if yaml_model_load(model)["head"].get("use_kps", False) else "detect"
+        super().__init__(model=model, task=task, verbose=verbose)
         if hasattr(self.model, "model"):
-            self.model.model[-1].kpt_shape = tuple(self.model.kpt_shape)
+            network = self.model.model[-1]
+            network.head.use_kps = self.task == "pose"
+            if self.task == "pose":
+                network.kpt_shape = tuple(self.model.kpt_shape)
         self.overrides.update(
             imgsz=640,
             epochs=640,
@@ -84,15 +90,21 @@ class SCRFD(Model):
 
     @property
     def task_map(self) -> dict[str, dict[str, Any]]:
-        from .predict import SCRFDPredictor
-        from .train import SCRFDTrainer
-        from .val import SCRFDValidator
+        from .predict import SCRFDPosePredictor, SCRFDPredictor
+        from .train import SCRFDPoseTrainer, SCRFDTrainer
+        from .val import SCRFDPoseValidator, SCRFDValidator
 
         return {
-            "pose": {
+            "detect": {
                 "model": SCRFDModel,
                 "trainer": SCRFDTrainer,
                 "validator": SCRFDValidator,
                 "predictor": SCRFDPredictor,
-            }
+            },
+            "pose": {
+                "model": SCRFDModel,
+                "trainer": SCRFDPoseTrainer,
+                "validator": SCRFDPoseValidator,
+                "predictor": SCRFDPosePredictor,
+            },
         }

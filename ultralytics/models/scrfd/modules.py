@@ -83,10 +83,33 @@ class BasicBlock(nn.Module):
         return self.relu(self.conv2(self.conv1(x)) + self.downsample(x))
 
 
+class Bottleneck(nn.Module):
+    """Bottleneck residual block used by SCRFD-34G."""
+
+    expansion = 4
+
+    def __init__(self, c1, planes, stride=1):
+        super().__init__()
+        c2 = planes * self.expansion
+        self.conv1 = ConvNormAct(c1, planes, k=1, norm="BN")
+        self.conv2 = ConvNormAct(planes, planes, s=stride, norm="BN")
+        self.conv3 = ConvNormAct(planes, c2, k=1, norm="BN", act=False)
+        if stride != 1 or c1 != c2:
+            downsample = [nn.AvgPool2d(stride, stride, ceil_mode=True, count_include_pad=False)] if stride != 1 else []
+            downsample.extend((nn.Conv2d(c1, c2, 1, bias=False), nn.BatchNorm2d(c2)))
+            self.downsample = nn.Sequential(*downsample)
+        else:
+            self.downsample = nn.Identity()
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.conv3(self.conv2(self.conv1(x))) + self.downsample(x))
+
+
 class ResNetV1e(nn.Module):
     """SCRFD ResNetV1e backbone with a deep stem and average-pool downsampling."""
 
-    def __init__(self, stage_blocks, stage_planes, base_channels):
+    def __init__(self, stage_blocks, stage_planes, base_channels, block="BasicBlock"):
         super().__init__()
         stem_half = base_channels // 2
         self.stem = nn.Sequential(
@@ -96,13 +119,14 @@ class ResNetV1e(nn.Module):
         )
         self.maxpool = nn.MaxPool2d(2, 2)
         self.stages = nn.ModuleList()
+        block_type = BasicBlock if block == "BasicBlock" else Bottleneck
         channels = base_channels
         for i, (repeats, planes) in enumerate(zip(stage_blocks, stage_planes)):
             stride = 1 if i == 0 else 2
-            blocks = [BasicBlock(channels, planes, stride)]
-            blocks.extend(BasicBlock(planes, planes) for _ in range(repeats - 1))
+            blocks = [block_type(channels, planes, stride)]
+            channels = planes * block_type.expansion if block_type is Bottleneck else planes
+            blocks.extend(block_type(channels, planes) for _ in range(repeats - 1))
             self.stages.append(nn.Sequential(*blocks))
-            channels = planes
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
                 nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
@@ -112,6 +136,8 @@ class ResNetV1e(nn.Module):
         for module in self.modules():
             if isinstance(module, BasicBlock):
                 nn.init.zeros_(module.conv2[1].weight)
+            elif isinstance(module, Bottleneck):
+                nn.init.zeros_(module.conv3[1].weight)
 
     def forward(self, x):
         outputs = []
@@ -168,12 +194,21 @@ class SCRFDHead(nn.Module):
     """Anchor-based SCRFD classification, box and five-landmark head."""
 
     def __init__(
-        self, channels, feat_channels, stacked_convs=2, norm="BN", dw_conv=False, strides_share=False, scale_mode=0
+        self,
+        channels,
+        feat_channels,
+        stacked_convs=2,
+        norm="BN",
+        dw_conv=False,
+        strides_share=False,
+        scale_mode=0,
+        use_kps=True,
     ):
         super().__init__()
         self.register_buffer("stride", torch.tensor([8.0, 16.0, 32.0]), persistent=False)
         self.export = False
         self.strides_share = strides_share
+        self.use_kps = use_kps
         count = 1 if strides_share else 3
         conv = DepthwiseSeparableConv if dw_conv else ConvNormAct
         self.towers = nn.ModuleList(
@@ -184,7 +219,7 @@ class SCRFDHead(nn.Module):
         )
         self.cls = nn.ModuleList(nn.Conv2d(feat_channels, 2, 3, padding=1) for _ in range(count))
         self.box = nn.ModuleList(nn.Conv2d(feat_channels, 8, 3, padding=1) for _ in range(count))
-        self.kps = nn.ModuleList(nn.Conv2d(feat_channels, 20, 3, padding=1) for _ in range(count))
+        self.kps = nn.ModuleList(nn.Conv2d(feat_channels, 20, 3, padding=1) for _ in range(count)) if use_kps else None
         self.scales = (
             nn.ModuleList(Scale() for _ in range(3)) if scale_mode and (strides_share or scale_mode == 2) else None
         )
@@ -207,16 +242,17 @@ class SCRFDHead(nn.Module):
             cls_scores.append(self.cls[j](x))
             box = self.box[j](x)
             box_preds.append(self.scales[i](box) if self.scales is not None else box)
-            kps_preds.append(self.kps[j](x))
-        raw = (cls_scores, box_preds, kps_preds)
+            if self.use_kps:
+                kps_preds.append(self.kps[j](x))
+        raw = (cls_scores, box_preds, kps_preds) if self.use_kps else (cls_scores, box_preds)
         if self.training:
             return raw
         decoded = self.decode(*raw)
         return decoded if self.export else (decoded, raw)
 
-    def decode(self, cls_scores, box_preds, kps_preds):
+    def decode(self, cls_scores, box_preds, kps_preds=None):
         boxes, scores, keypoints = [], [], []
-        for cls, box, kps, stride in zip(cls_scores, box_preds, kps_preds, self.stride):
+        for i, (cls, box, stride) in enumerate(zip(cls_scores, box_preds, self.stride)):
             b, _, h, w = cls.shape
             sy = torch.arange(h, device=cls.device, dtype=cls.dtype)
             sx = torch.arange(w, device=cls.device, dtype=cls.dtype)
@@ -227,10 +263,16 @@ class SCRFDHead(nn.Module):
             xyxy = torch.cat((centers - distances[..., :2], centers + distances[..., 2:]), -1)
             boxes.append(torch.cat(((xyxy[..., :2] + xyxy[..., 2:]) / 2, xyxy[..., 2:] - xyxy[..., :2]), -1))
             scores.append(cls.permute(0, 2, 3, 1).reshape(b, -1, 1).sigmoid())
-            offsets = kps.permute(0, 2, 3, 1).reshape(b, -1, 5, 2) * stride
-            xy = centers.unsqueeze(2) + offsets
-            keypoints.append(torch.cat((xy, torch.ones_like(xy[..., :1])), -1).flatten(2))
-        return torch.cat((torch.cat(boxes, 1), torch.cat(scores, 1), torch.cat(keypoints, 1)), -1).transpose(1, 2)
+            if self.use_kps:
+                offsets = kps_preds[i].permute(0, 2, 3, 1).reshape(b, -1, 5, 2) * stride
+                xy = centers.unsqueeze(2) + offsets
+                keypoints.append(torch.cat((xy, torch.ones_like(xy[..., :1])), -1).flatten(2))
+        output = (
+            (torch.cat(boxes, 1), torch.cat(scores, 1), torch.cat(keypoints, 1))
+            if self.use_kps
+            else (torch.cat(boxes, 1), torch.cat(scores, 1))
+        )
+        return torch.cat(output, -1).transpose(1, 2)
 
 
 class SCRFDNetwork(nn.Module):
@@ -240,19 +282,26 @@ class SCRFDNetwork(nn.Module):
         super().__init__()
         self.kpt_shape = (5, 3)
         backbone, neck, head = cfg["backbone"], cfg["neck"], cfg["head"]
-        if backbone.get("type", "MobileNetV1") == "MobileNetV1":
+        mobile = backbone.get("type", "MobileNetV1") == "MobileNetV1"
+        if mobile:
             self.backbone = MobileNetV1(backbone["stage_blocks"], backbone["stage_planes"])
         else:
-            self.backbone = ResNetV1e(backbone["stage_blocks"], backbone["stage_planes"], backbone["base_channels"])
+            self.backbone = ResNetV1e(
+                backbone["stage_blocks"],
+                backbone["stage_planes"],
+                backbone["base_channels"],
+                backbone.get("block", "BasicBlock"),
+            )
         self.neck = PAFPN(neck["in_channels"], neck["out_channels"])
         self.head = SCRFDHead(
             neck["out_channels"],
             head["feat_channels"],
             head["stacked_convs"],
             head["norm"],
-            head["dw_conv"],
+            head.get("dw_conv", mobile),
             head["strides_share"],
             head["scale_mode"],
+            head.get("use_kps", "kpt_shape" in cfg),
         )
 
     def forward(self, x):

@@ -1,8 +1,9 @@
 from ultralytics.data.augment import LetterBox
+from ultralytics.models.yolo.detect import DetectionPredictor
 from ultralytics.models.yolo.pose import PosePredictor
 
 
-class SCRFDPredictor(PosePredictor):
+class _SCRFDPredictor:
     """SCRFD predictor using the official zero-valued letterbox padding."""
 
     def pre_transform(self, images):
@@ -17,3 +18,11 @@ class SCRFDPredictor(PosePredictor):
             center=False,
         )
         return [letterbox(image=image) for image in images]
+
+
+class SCRFDPredictor(_SCRFDPredictor, DetectionPredictor):
+    """Predict with landmark-free SCRFD variants."""
+
+
+class SCRFDPosePredictor(_SCRFDPredictor, PosePredictor):
+    """Predict boxes and five landmarks with SCRFD-KPS variants."""

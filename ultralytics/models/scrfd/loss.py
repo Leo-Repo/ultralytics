@@ -28,11 +28,13 @@ class SCRFDCriterion:
         self.strides = (8, 16, 32)
         self.base_sizes = (16, 64, 256)
         self.topk = 9
+        self.use_kps = model.model[-1].head.use_kps
 
     def __call__(self, preds, batch):
         if len(preds) == 2 and isinstance(preds[0], torch.Tensor):
             preds = preds[1]
-        cls_levels, box_levels, kps_levels = preds
+        cls_levels, box_levels = preds[:2]
+        kps_levels = preds[2] if self.use_kps else None
         image_size = batch["img"].shape[2:]
         anchors = [
             self._anchors(x.shape[2:], base, stride, x)
@@ -46,45 +48,50 @@ class SCRFDCriterion:
             mask = batch["batch_idx"].view(-1).long() == batch_index
             scale = batch["bboxes"].new_tensor((image_size[1], image_size[0], image_size[1], image_size[0]))
             gt_boxes = xywh2xyxy(batch["bboxes"][mask] * scale)
-            gt_kps = batch["keypoints"][mask].clone()
-            if len(gt_kps):
-                gt_kps[..., 0] *= image_size[1]
-                gt_kps[..., 1] *= image_size[0]
+            if self.use_kps:
+                gt_kps = batch["keypoints"][mask].clone()
+                if len(gt_kps):
+                    gt_kps[..., 0] *= image_size[1]
+                    gt_kps[..., 1] *= image_size[0]
             assigned = self._assign(flat_anchors, counts, gt_boxes)
             positive = assigned >= 0
             labels = torch.ones(len(flat_anchors), dtype=torch.long, device=flat_anchors.device)
             labels[positive] = 0
             targets = torch.zeros_like(flat_anchors)
-            kps_targets = flat_anchors.new_zeros((len(flat_anchors), 10))
-            kps_weights = flat_anchors.new_zeros((len(flat_anchors), 10))
+            kps_targets = flat_anchors.new_zeros((len(flat_anchors), 10)) if self.use_kps else None
+            kps_weights = flat_anchors.new_zeros((len(flat_anchors), 10)) if self.use_kps else None
             if positive.any():
                 targets[positive] = gt_boxes[assigned[positive]]
-                selected_kps = gt_kps[assigned[positive]]
-                kps_targets[positive] = selected_kps[..., :2].flatten(1)
-                kps_weights[positive] = selected_kps[..., 2:].expand(-1, -1, 2).flatten(1)
+                if self.use_kps:
+                    selected_kps = gt_kps[assigned[positive]]
+                    kps_targets[positive] = selected_kps[..., :2].flatten(1)
+                    kps_weights[positive] = selected_kps[..., 2:].expand(-1, -1, 2).flatten(1)
             total_pos += int(positive.sum())
             all_labels.append(labels)
             all_boxes.append(targets)
-            all_kps.append(kps_targets)
-            all_kps_weights.append(kps_weights)
+            if self.use_kps:
+                all_kps.append(kps_targets)
+                all_kps_weights.append(kps_weights)
 
         labels = torch.stack(all_labels)
         box_targets = torch.stack(all_boxes)
-        kps_targets = torch.stack(all_kps)
-        kps_weights = torch.stack(all_kps_weights)
+        if self.use_kps:
+            kps_targets = torch.stack(all_kps)
+            kps_weights = torch.stack(all_kps_weights)
         num_pos = _reduce_mean(batch["img"].new_tensor(total_pos)).clamp(min=1)
         cls_loss = batch["img"].new_tensor(0.0)
         box_loss = batch["img"].new_tensor(0.0)
         kps_loss = batch["img"].new_tensor(0.0)
         weight_sum = batch["img"].new_tensor(0.0)
         offset = 0
-        for cls, box, kps, anchor, count, stride in zip(
-            cls_levels, box_levels, kps_levels, anchors, counts, self.strides
+        for level, (cls, box, anchor, count, stride) in enumerate(
+            zip(cls_levels, box_levels, anchors, counts, self.strides)
         ):
             b = cls.shape[0]
             cls = cls.permute(0, 2, 3, 1).reshape(b, count, 1)
             box = box.permute(0, 2, 3, 1).reshape(b, count, 4)
-            kps = kps.permute(0, 2, 3, 1).reshape(b, count, 10)
+            if self.use_kps:
+                kps = kps_levels[level].permute(0, 2, 3, 1).reshape(b, count, 10)
             level_labels = labels[:, offset : offset + count]
             positive = level_labels == 0
             quality = torch.zeros_like(level_labels, dtype=cls.dtype)
@@ -97,12 +104,13 @@ class SCRFDCriterion:
                 box_loss += (
                     (1 - bbox_iou(decoded, target_boxes, xywh=False, DIoU=True).squeeze(-1)) * weights
                 ).sum() * 2
-                target_kps = kps_targets[:, offset : offset + count][positive].reshape(-1, 5, 2) / stride
-                target_offsets = (target_kps - centers.unsqueeze(1)).flatten(1)
-                kp_weight = kps_weights[:, offset : offset + count][positive] * weights[:, None]
-                kps_loss += (
-                    F.smooth_l1_loss(kps[positive], target_offsets, beta=1 / 9, reduction="none") * kp_weight
-                ).sum() * 0.1
+                if self.use_kps:
+                    target_kps = kps_targets[:, offset : offset + count][positive].reshape(-1, 5, 2) / stride
+                    target_offsets = (target_kps - centers.unsqueeze(1)).flatten(1)
+                    kp_weight = kps_weights[:, offset : offset + count][positive] * weights[:, None]
+                    kps_loss += (
+                        F.smooth_l1_loss(kps[positive], target_offsets, beta=1 / 9, reduction="none") * kp_weight
+                    ).sum() * 0.1
                 weight_sum += weights.sum()
             pred_sigmoid = cls.sigmoid().squeeze(-1)
             qfl = (
@@ -118,7 +126,9 @@ class SCRFDCriterion:
             cls_loss += qfl.sum() / num_pos
             offset += count
         normalizer = _reduce_mean(weight_sum).clamp(min=1e-6)
-        losses = {"cls_loss": cls_loss, "box_loss": box_loss / normalizer, "kps_loss": kps_loss / normalizer}
+        losses = {"cls_loss": cls_loss, "box_loss": box_loss / normalizer}
+        if self.use_kps:
+            losses["kps_loss"] = kps_loss / normalizer
         return sum(losses.values()), losses
 
     @staticmethod

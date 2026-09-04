@@ -1,5 +1,4 @@
 nc: 1
-kpt_shape: [5, 3]
 
 backbone:
     type: MobileNetV1
@@ -13,8 +12,8 @@ neck:
 head:
     stacked_convs: 2
     feat_channels: 64
-    norm: BN
+    norm: 16
     dw_conv: true
-    use_kps: true
-    strides_share: false
-    scale_mode: 0
+    use_kps: false
+    strides_share: true
+    scale_mode: 2
