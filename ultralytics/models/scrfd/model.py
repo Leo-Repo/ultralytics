@@ -34,7 +34,7 @@ class SCRFDModel(BaseModel):
         self.inplace = True
         self.end2end = False
         if verbose:
-            LOGGER.info(f"SCRFD-500M-KPS summary: {network.np:,} parameters")
+            LOGGER.info(f"SCRFD summary: {network.np:,} parameters")
 
     def init_criterion(self):
         return SCRFDCriterion(self)

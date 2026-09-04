@@ -24,6 +24,14 @@ keywords: Ultralytics, ultralytics.models.scrfd.modules, API reference, YOLO, Py
 
 <br><br><hr><br>
 
+## ::: ultralytics.models.scrfd.modules.BasicBlock
+
+<br><br><hr><br>
+
+## ::: ultralytics.models.scrfd.modules.ResNetV1e
+
+<br><br><hr><br>
+
 ## ::: ultralytics.models.scrfd.modules.PAFPN
 
 <br><br><hr><br>

@@ -64,6 +64,64 @@ class MobileNetV1(nn.Module):
         return outputs
 
 
+class BasicBlock(nn.Module):
+    """Basic residual block used by the SCRFD ResNetV1e backbone."""
+
+    def __init__(self, c1, c2, stride=1):
+        super().__init__()
+        self.conv1 = ConvNormAct(c1, c2, s=stride, norm="BN")
+        self.conv2 = ConvNormAct(c2, c2, norm="BN", act=False)
+        if stride != 1 or c1 != c2:
+            downsample = [nn.AvgPool2d(stride, stride, ceil_mode=True, count_include_pad=False)] if stride != 1 else []
+            downsample.extend((nn.Conv2d(c1, c2, 1, bias=False), nn.BatchNorm2d(c2)))
+            self.downsample = nn.Sequential(*downsample)
+        else:
+            self.downsample = nn.Identity()
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.conv2(self.conv1(x)) + self.downsample(x))
+
+
+class ResNetV1e(nn.Module):
+    """SCRFD ResNetV1e backbone with a deep stem and average-pool downsampling."""
+
+    def __init__(self, stage_blocks, stage_planes, base_channels):
+        super().__init__()
+        stem_half = base_channels // 2
+        self.stem = nn.Sequential(
+            ConvNormAct(3, stem_half, s=2, norm="BN"),
+            ConvNormAct(stem_half, stem_half, norm="BN"),
+            ConvNormAct(stem_half, base_channels, norm="BN"),
+        )
+        self.maxpool = nn.MaxPool2d(2, 2)
+        self.stages = nn.ModuleList()
+        channels = base_channels
+        for i, (repeats, planes) in enumerate(zip(stage_blocks, stage_planes)):
+            stride = 1 if i == 0 else 2
+            blocks = [BasicBlock(channels, planes, stride)]
+            blocks.extend(BasicBlock(planes, planes) for _ in range(repeats - 1))
+            self.stages.append(nn.Sequential(*blocks))
+            channels = planes
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(module, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+        for module in self.modules():
+            if isinstance(module, BasicBlock):
+                nn.init.zeros_(module.conv2[1].weight)
+
+    def forward(self, x):
+        outputs = []
+        x = self.maxpool(self.stem(x))
+        for stage in self.stages:
+            x = stage(x)
+            outputs.append(x)
+        return outputs
+
+
 class PAFPN(nn.Module):
     """Path aggregation FPN used by the official SCRFD implementation."""
 
@@ -109,18 +167,18 @@ class Scale(nn.Module):
 class SCRFDHead(nn.Module):
     """Anchor-based SCRFD classification, box and five-landmark head."""
 
-    def __init__(self, channels, feat_channels, stacked_convs=2, norm="BN", strides_share=False, scale_mode=0):
+    def __init__(
+        self, channels, feat_channels, stacked_convs=2, norm="BN", dw_conv=False, strides_share=False, scale_mode=0
+    ):
         super().__init__()
         self.register_buffer("stride", torch.tensor([8.0, 16.0, 32.0]), persistent=False)
         self.export = False
         self.strides_share = strides_share
         count = 1 if strides_share else 3
+        conv = DepthwiseSeparableConv if dw_conv else ConvNormAct
         self.towers = nn.ModuleList(
             nn.Sequential(
-                *[
-                    DepthwiseSeparableConv(channels if i == 0 else feat_channels, feat_channels, norm)
-                    for i in range(stacked_convs)
-                ]
+                *[conv(channels if i == 0 else feat_channels, feat_channels, norm=norm) for i in range(stacked_convs)]
             )
             for _ in range(count)
         )
@@ -182,13 +240,17 @@ class SCRFDNetwork(nn.Module):
         super().__init__()
         self.kpt_shape = (5, 3)
         backbone, neck, head = cfg["backbone"], cfg["neck"], cfg["head"]
-        self.backbone = MobileNetV1(backbone["stage_blocks"], backbone["stage_planes"])
+        if backbone.get("type", "MobileNetV1") == "MobileNetV1":
+            self.backbone = MobileNetV1(backbone["stage_blocks"], backbone["stage_planes"])
+        else:
+            self.backbone = ResNetV1e(backbone["stage_blocks"], backbone["stage_planes"], backbone["base_channels"])
         self.neck = PAFPN(neck["in_channels"], neck["out_channels"])
         self.head = SCRFDHead(
             neck["out_channels"],
             head["feat_channels"],
             head["stacked_convs"],
             head["norm"],
+            head["dw_conv"],
             head["strides_share"],
             head["scale_mode"],
         )
