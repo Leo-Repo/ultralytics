@@ -856,6 +856,8 @@ class Exporter:
             from ultralytics.utils.export.executorch import executorch_wrapper
 
             model = executorch_wrapper(model)
+        from ultralytics.models.scrfd.modules import SCRFDHead
+
         for m in model.modules():
             if isinstance(m, Attention) and fmt == "coreml" and self.args.format.lower() != "mlmodel":
                 m.format = fmt
@@ -869,6 +871,9 @@ class Exporter:
                     m.bake_argmax = check_version(f"tensorrt-cu{cuda_major}", ">=10.0.0") or check_version(
                         "tensorrt", ">=10.0.0"
                     )
+            if isinstance(m, SCRFDHead):
+                m.export = True
+                m.format = self.args.format
             if isinstance(m, (Detect, RTDETRDecoder)):  # includes all Detect subclasses like Segment, Pose, OBB
                 m.dynamic = self.args.dynamic
                 m.export = True
