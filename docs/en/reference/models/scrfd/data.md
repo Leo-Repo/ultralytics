@@ -12,11 +12,27 @@ keywords: Ultralytics, ultralytics.models.scrfd.data, API reference, YOLO, Pytho
 
 <br>
 
+## ::: ultralytics.models.scrfd.data.SCRFDPhotoMetricDistortion
+
+<br><br><hr><br>
+
+## ::: ultralytics.models.scrfd.data.SCRFDRandomRoll
+
+<br><br><hr><br>
+
 ## ::: ultralytics.models.scrfd.data.SCRFDSquareCrop
 
 <br><br><hr><br>
 
 ## ::: ultralytics.models.scrfd.data.SCRFDDataset
+
+<br><br><hr><br>
+
+## ::: ultralytics.models.scrfd.data.rotate_face_sample
+
+<br><br><hr><br>
+
+## ::: ultralytics.models.scrfd.data._transform_points
 
 <br><br><hr><br>
 

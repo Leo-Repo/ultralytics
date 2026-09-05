@@ -172,12 +172,11 @@ class SCRFDCriterion:
         candidate_overlaps = overlaps[candidates, torch.arange(len(gt_boxes), device=anchors.device)]
         is_positive = candidate_overlaps >= candidate_overlaps.mean(0) + candidate_overlaps.std(0)
         candidate_centers = centers[candidates]
-        inside = (
-            torch.cat((candidate_centers - gt_boxes[None, :, :2], gt_boxes[None, :, 2:] - candidate_centers), -1).amin(
-                -1
-            )
-            > 0.001
-        )
+        inside_distance = torch.cat(
+            (candidate_centers - gt_boxes[None, :, :2], gt_boxes[None, :, 2:] - candidate_centers), -1
+        ).amin(-1)
+        gt_scale = ((gt_boxes[:, 2] - gt_boxes[:, 0]) * (gt_boxes[:, 3] - gt_boxes[:, 1])).clamp(min=1e-4).sqrt()
+        inside = inside_distance / gt_scale > 0.001
         is_positive &= inside
         match = overlaps.new_full(overlaps.shape, -1e8)
         rows = candidates[is_positive]

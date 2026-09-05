@@ -6,7 +6,7 @@ from copy import copy, deepcopy
 import cv2
 import numpy as np
 
-from ultralytics.data.augment import LetterBox, RandomPerspective
+from ultralytics.data.augment import LetterBox, RandomHSV, RandomPerspective
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.utils import colorstr
 from ultralytics.utils.instance import Instances
@@ -119,6 +119,31 @@ def _transform_points(points, matrix):
     points = np.asarray(points, dtype=np.float32)
     homogeneous = np.concatenate((points, np.ones((len(points), 1), dtype=np.float32)), axis=1)
     return (homogeneous @ matrix.T)[:, :2]
+
+
+class SCRFDPhotoMetricDistortion:
+    """Apply the official SCRFD brightness, contrast, HSV, and channel-order augmentation."""
+
+    def __call__(self, labels):
+        """Distort one BGR training image while leaving its geometry unchanged."""
+        image = labels["img"].astype(np.float32)
+        if np.random.randint(2):
+            image += np.random.uniform(-32, 32)
+        contrast_last = np.random.randint(2)
+        if contrast_last and np.random.randint(2):
+            image *= np.random.uniform(0.5, 1.5)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        if np.random.randint(2):
+            image[..., 1] *= np.random.uniform(0.5, 1.5)
+        if np.random.randint(2):
+            image[..., 0] = (image[..., 0] + np.random.uniform(-18, 18)) % 360
+        image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)
+        if not contrast_last and np.random.randint(2):
+            image *= np.random.uniform(0.5, 1.5)
+        if np.random.randint(2):
+            image = image[..., np.random.permutation(3)]
+        labels["img"] = np.ascontiguousarray(image)
+        return labels
 
 
 class SCRFDRandomRoll:
@@ -242,6 +267,8 @@ class SCRFDDataset(YOLODataset):
             spatial.insert(affine_index, SCRFDRandomRoll(hyp.degrees, self.data.get("scrfd_rotation", {})))
             spatial.insert(affine_index + 1, SCRFDSquareCrop())
             spatial.insert(affine_index + 2, LetterBox((self.imgsz, self.imgsz), scale_fill=True))
+            color_index = next(i for i, transform in enumerate(transforms) if isinstance(transform, RandomHSV))
+            transforms[color_index] = SCRFDPhotoMetricDistortion()
         else:
             transforms[0].padding_value = 0
             transforms[0].center = False

@@ -112,7 +112,14 @@ scrfd_rotation:
 ```
 
 Training randomness follows the Ultralytics `seed` and `deterministic` settings. Rotation is applied before the native
-SCRFD random square crop and resize. Other SCRFD augmentation remains active when `degrees=0`.
+SCRFD random square crop, resize, and official photometric distortion. Other SCRFD augmentation remains active when
+`degrees=0`.
+
+Five-column `labelv2.txt` rows whose final value is `1` retain their source ignore state. Rotation additionally marks a
+face ignored when `drop_visible <= visible_ratio < keep_visible`; smaller visible ratios and boxes below
+`min_face_size` are dropped. A landmark outside the canvas only loses its own visibility and does not by itself ignore
+the whole face. Random square crop drops faces whose centers lie outside the selected crop instead of marking them
+ignored.
 
 ### Deterministic rotation validation
 
@@ -127,8 +134,9 @@ python tools/scrfd_rotation_val.py generate \
 ```
 
 The output includes synchronized Ultralytics HBB/KPS labels, one JSONL manifest and YAML per angle, an aggregate YAML,
-and filtering statistics. Re-run with `--existing verify` to byte-check deterministic images, labels, and manifests.
-Use `--canvas-mode expand_letterbox` for the alternate canvas strategy.
+and filtering statistics. Ignored targets are counted in the manifest but omitted from positive validation GT. Re-run
+with `--existing verify` to byte-check deterministic images, labels, and manifests. Use
+`--canvas-mode expand_letterbox` for the alternate canvas strategy.
 
 Evaluate native and rotated validation separately. The angle evaluator reports each angle, the aggregate metrics,
 worst-angle recall, and recall range:

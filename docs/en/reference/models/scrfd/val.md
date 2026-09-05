@@ -12,9 +12,13 @@ keywords: Ultralytics, ultralytics.models.scrfd.val, API reference, YOLO, Python
 
 <br>
 
+## ::: ultralytics.models.scrfd.val._SCRFDValidator
+
+<br><br><hr><br>
+
 ## ::: ultralytics.models.scrfd.val.SCRFDValidator
 
-<br><br>
+<br><br><hr><br>
 
 ## ::: ultralytics.models.scrfd.val.SCRFDPoseValidator
 

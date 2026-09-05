@@ -1,4 +1,5 @@
 nc: 1
+lr0: 0.02
 
 backbone:
     type: ResNetV1e

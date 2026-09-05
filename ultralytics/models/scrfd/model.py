@@ -64,7 +64,7 @@ class SCRFD(Model):
             epochs=640,
             batch=16,
             optimizer="SGD",
-            lr0=0.01,
+            lr0=self.model.yaml.get("lr0", 0.01),
             momentum=0.9,
             weight_decay=0.0005,
             mosaic=0.0,

@@ -100,9 +100,13 @@ def convert_retinaface(
             x, y, x2, y2 = max(x, 0), max(y, 0), min(x2, width), min(y2, height)
             if x2 <= x or y2 <= y:
                 continue
+            ignored = bool(record["shape"] and len(face) == 5 and face[4] == 1)
+            if ignored and use_obb:
+                continue
+            cls = -0.01 if ignored else 0
             if use_obb:
                 row = [
-                    0,
+                    cls,
                     x / width,
                     y / height,
                     x2 / width,
@@ -114,7 +118,7 @@ def convert_retinaface(
                 ]
             else:
                 row = [
-                    0,
+                    cls,
                     (x + x2) / (2 * width),
                     (y + y2) / (2 * height),
                     (x2 - x) / width,
@@ -276,7 +280,9 @@ def generate_rotated_face_val(
             )
             filename = f"{index:06d}__{Path(image_file).stem}__rot{int(angle) % 360:03d}.jpg"
             image_path, label_path = image_root / filename, label_root / Path(filename).with_suffix(".txt")
-            status = metadata["status"]
+            status = metadata["status"].copy()
+            status[(label["cls"].reshape(-1) < 0) & (status > 0)] = 1
+            metadata["status"] = status
             rows = _rotated_face_rows(
                 label["cls"].reshape(-1),
                 rotated_boxes,

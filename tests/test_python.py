@@ -2,6 +2,7 @@
 
 import contextlib
 import csv
+import json
 import os
 import shutil
 import tarfile
@@ -160,6 +161,45 @@ def test_scrfd_roll_geometry_and_disable():
         "instances": Instances(boxes.copy(), np.zeros((1, 1000, 2)), keypoints.copy(), bbox_format="xyxy"),
     }
     assert SCRFDRandomRoll(0, {})(labels) is labels
+
+
+def test_scrfd_official_training_defaults_and_ignored_annotations(tmp_path):
+    """SCRFD must retain official 34G LR, photometric transform, and labelv2 ignore boxes."""
+    from ultralytics import SCRFD
+    from ultralytics.data.converter import convert_retinaface
+    from ultralytics.models.scrfd.data import SCRFDDataset, SCRFDPhotoMetricDistortion
+
+    assert SCRFD("scrfd-34g.yaml").overrides["lr0"] == 0.02
+    image_root = tmp_path / "source"
+    image_root.mkdir()
+    cv2.imwrite(str(image_root / "face.jpg"), np.zeros((64, 64, 3), dtype=np.uint8))
+    annotations = tmp_path / "labelv2.txt"
+    annotations.write_text("# face.jpg 64 64\n8 8 24 24 1\n32 32 56 56 0\n")
+    data = convert_retinaface(annotations, image_root, tmp_path / "converted", split="train")
+    rows = (tmp_path / "converted" / "labels" / "train" / "face.txt").read_text().splitlines()
+    assert [float(row.split()[0]) for row in rows] == [-0.01, 0.0]
+
+    dataset = SCRFDDataset(
+        img_path=str(tmp_path / "converted" / "images" / "train"),
+        imgsz=64,
+        batch_size=1,
+        augment=True,
+        hyp=get_cfg(overrides={"task": "pose", "imgsz": 64, "degrees": 0}),
+        rect=False,
+        data={**YAML.load(data), "channels": 3},
+        task="pose",
+    )
+    assert dataset.labels[0]["cls"].min() < 0
+    assert any(isinstance(transform, SCRFDPhotoMetricDistortion) for transform in dataset.transforms)
+
+    from ultralytics.data.converter import generate_rotated_face_val
+
+    rotation = tmp_path / "rotation"
+    generate_rotated_face_val(data, rotation, angles=(0,), imgsz=(64, 64))
+    generated_rows = (rotation / "labels" / "val_rotation" / "angle_000" / "000000__face__rot000.txt").read_text()
+    summary = json.loads((rotation / "rotation_summary.json").read_text())
+    assert len(generated_rows.splitlines()) == 1
+    assert summary["angles"][0]["kept"] == 1 and summary["angles"][0]["ignored"] == 1
 
 
 def test_scrfd_rotation_val_is_deterministic(tmp_path):
