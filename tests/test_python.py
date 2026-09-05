@@ -2,6 +2,7 @@
 
 import contextlib
 import csv
+import json
 import os
 import shutil
 import tarfile
@@ -107,6 +108,256 @@ def test_build_yolo_dataset_hyp_isolated():
     cfg = get_cfg(overrides={"data": "coco8.yaml", "imgsz": 32, "rect": True})  # rect zeroes mosaic on the hyp used
     data_build.build_yolo_dataset(cfg, data["train"], batch=2, data=data, mode="train")
     assert cfg.mosaic == DEFAULT_CFG.mosaic
+
+
+def test_face_obb_rectangular_train_and_val_shapes(tmp_path):
+    """OBB labels must survive fixed rectangular training and validation transforms."""
+    images, labels = tmp_path / "images", tmp_path / "labels"
+    images.mkdir()
+    labels.mkdir()
+    cv2.imwrite(str(images / "face.jpg"), np.zeros((480, 640, 3), dtype=np.uint8))
+    (labels / "face.txt").write_text("0 0.25 0.25 0.75 0.25 0.75 0.75 0.25 0.75\n")
+    data = {"names": {0: "face"}, "nc": 1, "channels": 3}
+
+    train_cfg = get_cfg(
+        overrides={
+            "task": "obb",
+            "imgsz": [192, 320],
+            "rect": False,
+            "mosaic": 0.0,
+            "translate": 0.0,
+            "scale": 0.0,
+            "fliplr": 0.0,
+        }
+    )
+    train = data_build.build_yolo_dataset(train_cfg, str(images), batch=1, data=data, mode="train")
+    train_item = train[0]
+    assert train_item["img"].shape == (3, 192, 320) and train_item["bboxes"].shape == (1, 5)
+
+    val_cfg = get_cfg(overrides={"task": "obb", "imgsz": [192, 320], "rect": True})
+    val = data_build.build_yolo_dataset(val_cfg, str(images), batch=1, data=data, mode="val", rect=True)
+    val_item = val[0]
+    assert val_item["img"].shape == (3, 192, 320) and val_item["bboxes"].shape == (1, 5)
+
+
+def test_scrfd_roll_geometry_and_disable():
+    """SCRFD roll must share one matrix across pixels, HBB corners, and valid landmarks."""
+    from ultralytics.models.scrfd.data import SCRFDRandomRoll, rotate_face_sample
+    from ultralytics.utils.instance import Instances
+
+    image = np.zeros((60, 100, 3), dtype=np.uint8)
+    boxes = np.array([[30, 20, 70, 40]], dtype=np.float32)
+    keypoints = np.array([[[60, 30, 1], [0, 0, 0]]], dtype=np.float32)
+    _, rotated_boxes, rotated_keypoints, metadata = rotate_face_sample(image, boxes, keypoints, angle=90)
+    assert np.allclose(rotated_boxes[0], [40, 10, 60, 50])
+    assert np.allclose(rotated_keypoints[0, 0], [50, 20, 1])
+    assert np.array_equal(rotated_keypoints[0, 1], [0, 0, 0])
+    quad = metadata["quads"][0]
+    assert (quad >= rotated_boxes[0, :2]).all() and (quad <= rotated_boxes[0, 2:]).all()
+
+    labels = {
+        "img": image,
+        "cls": np.array([[0]], dtype=np.float32),
+        "instances": Instances(boxes.copy(), np.zeros((1, 1000, 2)), keypoints.copy(), bbox_format="xyxy"),
+    }
+    assert SCRFDRandomRoll(0, {})(labels) is labels
+
+
+def test_scrfd_official_training_defaults_and_ignored_annotations(tmp_path):
+    """SCRFD must retain official 34G LR, photometric transform, and labelv2 ignore boxes."""
+    from ultralytics import SCRFD
+    from ultralytics.data.converter import convert_retinaface
+    from ultralytics.models.scrfd.data import SCRFDDataset, SCRFDPhotoMetricDistortion
+
+    assert SCRFD("scrfd-34g.yaml").overrides["lr0"] == 0.02
+    image_root = tmp_path / "source"
+    image_root.mkdir()
+    cv2.imwrite(str(image_root / "face.jpg"), np.zeros((64, 64, 3), dtype=np.uint8))
+    annotations = tmp_path / "labelv2.txt"
+    annotations.write_text("# face.jpg 64 64\n8 8 24 24 1\n32 32 56 56 0\n")
+    data = convert_retinaface(annotations, image_root, tmp_path / "converted", split="train")
+    rows = (tmp_path / "converted" / "labels" / "train" / "face.txt").read_text().splitlines()
+    assert [float(row.split()[0]) for row in rows] == [-0.01, 0.0]
+
+    dataset = SCRFDDataset(
+        img_path=str(tmp_path / "converted" / "images" / "train"),
+        imgsz=64,
+        batch_size=1,
+        augment=True,
+        hyp=get_cfg(overrides={"task": "pose", "imgsz": 64, "degrees": 0}),
+        rect=False,
+        data={**YAML.load(data), "channels": 3},
+        task="pose",
+    )
+    assert dataset.labels[0]["cls"].min() < 0
+    assert any(isinstance(transform, SCRFDPhotoMetricDistortion) for transform in dataset.transforms)
+
+    from ultralytics.data.converter import generate_rotated_face_val
+
+    rotation = tmp_path / "rotation"
+    generate_rotated_face_val(data, rotation, angles=(0,), imgsz=(64, 64))
+    generated_rows = (rotation / "labels" / "val_rotation" / "angle_000" / "000000__face__rot000.txt").read_text()
+    summary = json.loads((rotation / "rotation_summary.json").read_text())
+    assert len(generated_rows.splitlines()) == 1
+    assert summary["angles"][0]["kept"] == 1 and summary["angles"][0]["ignored"] == 1
+
+
+def test_scrfd_rotation_val_is_deterministic(tmp_path):
+    """Fixed-angle validation generation must reproduce byte-identical images, labels, and manifests."""
+    from ultralytics.data.converter import generate_rotated_face_val
+
+    root = tmp_path / "source"
+    (root / "images" / "val").mkdir(parents=True)
+    (root / "labels" / "val").mkdir(parents=True)
+    image = np.zeros((60, 100, 3), dtype=np.uint8)
+    image[20:40, 30:70] = 255
+    cv2.imwrite(str(root / "images" / "val" / "face.jpg"), image)
+    (root / "labels" / "val" / "face.txt").write_text(
+        "0 0.5 0.5 0.4 0.333333 0.4 0.45 1 0.6 0.45 1 0.5 0.5 1 0.43 0.57 1 0.57 0.57 1\n"
+    )
+    data = root / "face.yaml"
+    data.write_text(
+        f"path: {root}\ntrain: images/val\nval: images/val\nnames: {{0: face}}\nkpt_shape: [5, 3]\n"
+        "flip_idx: [1, 0, 2, 4, 3]\n"
+    )
+    output = tmp_path / "rotation"
+    generated = generate_rotated_face_val(data, output, angles=(0, 90), imgsz=(64, 64))
+    generate_rotated_face_val(data, output, angles=(0, 90), imgsz=(64, 64), existing="verify")
+    assert generated.is_file()
+    assert len(list((output / "images" / "val_rotation").rglob("*.jpg"))) == 2
+    from ultralytics.data.utils import check_det_dataset
+    from ultralytics.models.scrfd.data import build_scrfd_dataset
+
+    rotation_data = check_det_dataset(str(generated))
+    cfg = get_cfg(overrides={"task": "pose", "imgsz": 64, "rect": True})
+    dataset = build_scrfd_dataset(cfg, rotation_data["val"], 1, rotation_data, mode="val", rect=True)
+    assert dataset[0]["img"].shape == (3, 64, 64)
+
+
+@pytest.mark.parametrize("name", ("500m", "1g", "2.5g", "10g", "34g", "500m-kps", "2.5g-kps", "10g-kps"))
+def test_scrfd_variants_forward(name):
+    """Every supported official SCRFD scale must construct and decode its expected prediction channels."""
+    from ultralytics import SCRFD
+
+    output = SCRFD(f"scrfd-{name}.yaml").model.eval()(torch.zeros(1, 3, 64, 64))[0]
+    assert output.shape == (1, 20 if name.endswith("kps") else 5, 168)
+    assert torch.isfinite(output).all()
+
+
+def test_scrfd_loss_accepts_ignored_rotation_targets():
+    """Partially visible roll targets must neither break assignment nor produce non-finite gradients."""
+    from ultralytics import SCRFD
+
+    model = SCRFD("scrfd-500m-kps.yaml").model
+    model.args = get_cfg(overrides={"task": "pose"})
+    model.train()
+    batch = {
+        "img": torch.rand(1, 3, 64, 64),
+        "batch_idx": torch.tensor([0, 0]),
+        "cls": torch.tensor([[0.0], [-1.0]]),
+        "bboxes": torch.tensor([[0.5, 0.5, 0.3, 0.3], [0.8, 0.8, 0.2, 0.2]]),
+        "keypoints": torch.tensor(
+            [
+                [[0.45, 0.45, 1], [0.55, 0.45, 1], [0.5, 0.5, 1], [0.46, 0.55, 1], [0.54, 0.55, 1]],
+                [[0.75, 0.75, 0], [0.85, 0.75, 0], [0.8, 0.8, 0], [0.76, 0.85, 0], [0.84, 0.85, 0]],
+            ]
+        ),
+    }
+    loss, items = model(batch)
+    assert torch.isfinite(loss).all() and all(torch.isfinite(item) for item in items.values())
+    loss.sum().backward()
+
+
+def test_face_obb_normalization_paths():
+    """Trainer, Validator, and Predictor must share centered RGB normalization without changing the default mode."""
+    from types import SimpleNamespace
+
+    from ultralytics.engine.predictor import BasePredictor
+    from ultralytics.models.yolo.detect.train import DetectionTrainer
+    from ultralytics.models.yolo.detect.val import DetectionValidator
+    from ultralytics.utils import ops
+
+    pixels = torch.tensor([0, 128, 255], dtype=torch.uint8).view(1, 3, 1, 1)
+    expected = torch.tensor([-1.0, 0.0, 127 / 128]).view(1, 3, 1, 1)
+    assert torch.equal(ops.normalize_image(pixels.float(), "minus128_div128"), expected)
+    assert torch.equal(ops.normalize_image(pixels.float(), "scale_255"), pixels.float() / 255)
+
+    trainer = DetectionTrainer.__new__(DetectionTrainer)
+    trainer.device, trainer.stride = torch.device("cpu"), 32
+    trainer.args = SimpleNamespace(input_norm="minus128_div128", multi_scale=0.0)
+    assert torch.equal(trainer.preprocess_batch({"img": pixels.clone()})["img"], expected)
+
+    validator = DetectionValidator.__new__(DetectionValidator)
+    validator.device = torch.device("cpu")
+    validator.args = SimpleNamespace(input_norm="minus128_div128", quantize=None)
+    assert torch.equal(validator.preprocess({"img": pixels.clone()})["img"], expected)
+
+    predictor = BasePredictor.__new__(BasePredictor)
+    predictor.device = torch.device("cpu")
+    predictor.model = SimpleNamespace(fp16=False, input_norm="minus128_div128")
+    predictor.args = SimpleNamespace(input_norm="scale_255")
+    predictor.pre_transform = lambda images: images
+    bgr = np.array([[[0, 128, 255]]], dtype=np.uint8)
+    assert torch.equal(predictor.preprocess([bgr]), expected.flip(1))
+
+
+def test_face_obb_structure_and_rectangular_forward():
+    """Face OBB variants stay sub-1M, attention-free, ReLU-only, and preserve rectangular pyramid shapes."""
+    from ultralytics.nn.modules.block import C2PSA, Attention, PSABlock
+    from ultralytics.nn.modules.conv import Conv
+
+    default_act = type(Conv.default_act)
+    models = [YOLO(f"yolo26{x}-face-obb.yaml") for x in "msn"]
+    assert [sum(p.numel() for p in x.model.parameters()) for x in models] == [862232, 669308, 535778]
+    model = models[0].model
+    assert model.yaml["nc"] == 1 and model.model[-1].reg_max == 1 and model.yaml["opset"] == 11
+    assert not any(
+        isinstance(x, (Attention, C2PSA, PSABlock, torch.nn.SiLU, torch.nn.Softmax, torch.nn.Sigmoid))
+        for x in model.modules()
+    )
+    assert type(Conv.default_act) is default_act
+
+    shapes = []
+    handle = model.model[-1].register_forward_pre_hook(lambda _, inputs: shapes.extend(x.shape[-2:] for x in inputs[0]))
+    model.eval()
+    output = model(torch.rand(1, 3, 192, 320))[0]
+    handle.remove()
+    assert shapes == [torch.Size((24, 40)), torch.Size((12, 20)), torch.Size((6, 10))]
+    assert output.shape == (1, 300, 7) and torch.isfinite(output).all()
+
+    official = YOLO("yolo26n-obb.yaml").model
+    assert any(isinstance(x, torch.nn.SiLU) for x in official.modules())
+
+
+def test_predictor_preserves_explicit_rectangular_shape():
+    """An explicit rectangular predict size must not collapse through minimum-rectangle auto padding."""
+    from types import SimpleNamespace
+
+    from ultralytics.engine.predictor import BasePredictor
+
+    predictor = BasePredictor.__new__(BasePredictor)
+    predictor.imgsz = [192, 320]
+    predictor.args = SimpleNamespace(rect=True)
+    predictor.model = SimpleNamespace(format="pt", dynamic=False, stride=32)
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    assert predictor.pre_transform([image])[0].shape[:2] == (192, 320)
+
+
+def test_face_obb_loss_backward():
+    """The complete end-to-end OBB loss produces finite gradients at the rectangular training size."""
+    model = YOLO("yolo26n-face-obb.yaml").model
+    model.args = get_cfg(overrides={"task": "obb"})
+    model.train()
+    batch = {
+        "img": torch.rand(1, 3, 192, 320),
+        "batch_idx": torch.tensor([0]),
+        "cls": torch.tensor([[0.0]]),
+        "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.25, 0.2]]),
+    }
+    loss, items = model(batch)
+    assert torch.isfinite(loss).all() and all(torch.isfinite(x) for x in items.values())
+    loss.sum().backward()
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
 
 
 def test_cfg_rejects_fuzzed_values():

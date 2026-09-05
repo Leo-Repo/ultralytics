@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import random
 import shutil
 from collections import defaultdict
@@ -17,10 +18,467 @@ import numpy as np
 from filelock import AsyncFileLock, Timeout
 from PIL import Image
 
-from ultralytics.utils import ASSETS_URL, DATASETS_DIR, LOGGER, NUM_THREADS, TQDM, YAML, clean_url
+from ultralytics.utils import ASSETS_URL, DATASETS_DIR, LOGGER, NUM_THREADS, TQDM, YAML, clean_url, colorstr
 from ultralytics.utils.checks import check_file
 from ultralytics.utils.downloads import download, zip_directory
 from ultralytics.utils.files import increment_path
+
+
+def convert_retinaface(
+    label_file, images_dir, output_dir, split="train", max_images=0, use_keypoints=True, use_obb=False, start_image=0
+):
+    """Convert InsightFace RetinaFace/SCRFD labels to an Ultralytics face dataset.
+
+    Args:
+        label_file (str | Path): InsightFace ``label.txt`` or SCRFD ``labelv2.txt`` annotation file.
+        images_dir (str | Path): Directory containing images referenced by the annotation file.
+        output_dir (str | Path): Destination dataset directory.
+        split (str): Dataset split name such as ``train`` or ``val``.
+        max_images (int): Maximum images to convert, or zero for all images.
+        use_keypoints (bool): Include the five facial landmarks for SCRFD-KPS training.
+        use_obb (bool): Write four-corner OBB labels instead of HBB labels.
+        start_image (int): Zero-based source record offset, useful for disjoint train/validation conversion.
+
+    Returns:
+        (Path): Generated dataset YAML path.
+    """
+    if use_keypoints and use_obb:
+        raise ValueError("use_keypoints and use_obb cannot both be enabled")
+    label_file, images_dir, output_dir = Path(label_file), Path(images_dir), Path(output_dir)
+    records, current = [], None
+    for raw_line in label_file.read_text().splitlines():
+        line = raw_line.strip()
+        if line.startswith("#"):
+            if current:
+                records.append(current)
+            fields = line[1:].strip().split()
+            current = {
+                "file": fields[0],
+                "shape": tuple(map(int, fields[1:3])) if len(fields) >= 3 else None,
+                "faces": [],
+            }
+        elif line and current is not None:
+            current["faces"].append([float(x) for x in line.split()])
+    if current:
+        records.append(current)
+    records = records[start_image : start_image + max_images if max_images else None]
+    if not records:
+        raise ValueError(f"No image records found in {label_file}")
+
+    image_root = output_dir / "images" / split
+    label_root = output_dir / "labels" / split
+    converted = 0
+    for record in TQDM(records, desc=f"Converting RetinaFace {split}"):
+        image_path = images_dir / record["file"]
+        if not image_path.is_file():
+            LOGGER.warning(f"Skipping missing image {image_path}")
+            continue
+        destination_image = image_root / record["file"]
+        destination_image.parent.mkdir(parents=True, exist_ok=True)
+        if not destination_image.exists():
+            try:
+                os.link(image_path, destination_image)
+            except OSError:
+                shutil.copy2(image_path, destination_image)
+        if record["shape"]:
+            width, height = record["shape"]
+        else:
+            image = cv2.imread(str(image_path))
+            if image is None:
+                LOGGER.warning(f"Skipping unreadable image {image_path}")
+                continue
+            height, width = image.shape[:2]
+        rows = []
+        for face in record["faces"]:
+            if len(face) < 4:
+                continue
+            x, y, a, b = face[:4]
+            if record["shape"]:  # SCRFD labelv2 stores xyxy; InsightFace label.txt stores xywh.
+                x2, y2 = a, b
+            else:
+                x2, y2 = x + a, y + b
+            x, y, x2, y2 = max(x, 0), max(y, 0), min(x2, width), min(y2, height)
+            if x2 <= x or y2 <= y:
+                continue
+            ignored = bool(record["shape"] and len(face) == 5 and face[4] == 1)
+            if ignored and use_obb:
+                continue
+            cls = -0.01 if ignored else 0
+            if use_obb:
+                row = [
+                    cls,
+                    x / width,
+                    y / height,
+                    x2 / width,
+                    y / height,
+                    x2 / width,
+                    y2 / height,
+                    x / width,
+                    y2 / height,
+                ]
+            else:
+                row = [
+                    cls,
+                    (x + x2) / (2 * width),
+                    (y + y2) / (2 * height),
+                    (x2 - x) / width,
+                    (y2 - y) / height,
+                ]
+            if use_keypoints:
+                landmarks = face[4:19] if len(face) >= 19 else [-1.0] * 15
+                for px, py, visibility in zip(landmarks[0::3], landmarks[1::3], landmarks[2::3]):
+                    valid = px >= 0 and py >= 0 and visibility >= 0
+                    row.extend(
+                        (
+                            min(max(px / width, 0), 1) if valid else 0,
+                            min(max(py / height, 0), 1) if valid else 0,
+                            int(valid),
+                        )
+                    )
+            rows.append(" ".join(f"{value:g}" for value in row))
+        destination = label_root / Path(record["file"]).with_suffix(".txt")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("\n".join(rows) + ("\n" if rows else ""))
+        converted += 1
+
+    yaml_path = output_dir / "retinaface.yaml"
+    data = YAML.load(yaml_path) if yaml_path.exists() else {"path": str(output_dir.resolve())}
+    data.update({split: f"images/{split}", "names": {0: "face"}})
+    if use_keypoints:
+        data.update({"kpt_shape": [5, 3], "flip_idx": [1, 0, 2, 4, 3]})
+    else:
+        data.pop("kpt_shape", None)
+        data.pop("flip_idx", None)
+    if use_obb:
+        data["task"] = "obb"
+    else:
+        data.pop("task", None)
+    if split == "train":
+        data.setdefault("val", f"images/{split}")
+    YAML.save(yaml_path, data)
+    LOGGER.info(f"Converted {converted} RetinaFace images to {yaml_path}")
+    return yaml_path
+
+
+def generate_rotated_face_val(
+    data,
+    output_dir,
+    split="val",
+    angles=tuple(range(0, 360, 30)),
+    imgsz=(640, 640),
+    canvas_mode="fixed",
+    border_mode="constant",
+    border_value=114,
+    drop_visible=0.3,
+    keep_visible=0.6,
+    min_face_size=2.0,
+    existing="error",
+    previews=0,
+):
+    """Generate a deterministic fixed-angle Ultralytics validation set for face models.
+
+    Args:
+        data (str | Path): Source Ultralytics detection or pose dataset YAML.
+        output_dir (str | Path): Destination dataset directory.
+        split (str): Source dataset split.
+        angles (Iterable[int]): Fixed counter-clockwise whole-degree rotation angles.
+        imgsz (tuple[int, int]): Output image size as ``(height, width)``.
+        canvas_mode (str): ``fixed`` or ``expand_letterbox``.
+        border_mode (str): ``constant`` or ``reflect``.
+        border_value (int): Constant border value.
+        drop_visible (float): Drop targets below this visible-area ratio.
+        keep_visible (float): Keep targets at or above this ratio; intermediate targets are ignored.
+        min_face_size (float): Drop output HBBs smaller than this width or height in pixels.
+        existing (str): Existing-output policy: ``error``, ``overwrite``, ``skip``, or ``verify``.
+        previews (int): Number of annotated geometry previews to save per angle.
+
+    Returns:
+        (Path): Generated aggregate dataset YAML.
+    """
+    from ultralytics.data.dataset import YOLODataset
+    from ultralytics.data.utils import check_det_dataset
+    from ultralytics.models.scrfd.data import rotate_face_sample
+
+    if existing not in {"error", "overwrite", "skip", "verify"}:
+        raise ValueError(f"Unsupported existing policy: {existing}")
+    angles = tuple(float(angle) for angle in angles)
+    if not angles:
+        raise ValueError("At least one rotation angle is required")
+    if any(not angle.is_integer() for angle in angles):
+        raise ValueError("Rotation validation angles must be whole degrees")
+    if len({int(angle) % 360 for angle in angles}) != len(angles):
+        raise ValueError("Rotation validation angles must be unique modulo 360 degrees")
+    output_dir = Path(output_dir)
+    if output_dir.exists() and any(output_dir.iterdir()):
+        if existing == "error":
+            raise FileExistsError(f"Output directory is not empty: {output_dir}")
+        if existing == "overwrite":
+            shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source = check_det_dataset(str(data), split=split)
+    task = source.get("task") or ("pose" if source.get("kpt_shape") else "detect")
+    from ultralytics.cfg import DEFAULT_CFG
+
+    dataset = YOLODataset(
+        img_path=source[split],
+        imgsz=max(imgsz),
+        batch_size=1,
+        augment=False,
+        hyp=DEFAULT_CFG,
+        rect=False,
+        cache=None,
+        single_cls=False,
+        stride=32,
+        pad=0.0,
+        prefix=colorstr("rotation-val: "),
+        task=task,
+        data=source,
+    )
+    output_height, output_width = map(int, imgsz)
+    angle_summaries, angle_yamls = [], []
+    for angle in angles:
+        angle_name = f"angle_{int(angle) % 360:03d}"
+        image_root = output_dir / "images" / "val_rotation" / angle_name
+        label_root = output_dir / "labels" / "val_rotation" / angle_name
+        image_root.mkdir(parents=True, exist_ok=True)
+        label_root.mkdir(parents=True, exist_ok=True)
+        records, totals = [], {"images": 0, "faces": 0, "kept": 0, "ignored": 0, "dropped": 0}
+        for index, (image_file, label) in enumerate(zip(dataset.im_files, dataset.labels)):
+            image = cv2.imread(image_file)
+            if image is None:
+                raise FileNotFoundError(f"Unable to read {image_file}")
+            height, width = image.shape[:2]
+            xywh = label["bboxes"].astype(np.float32).copy()
+            xywh[:, [0, 2]] *= width
+            xywh[:, [1, 3]] *= height
+            boxes = np.column_stack(
+                (
+                    xywh[:, 0] - xywh[:, 2] / 2,
+                    xywh[:, 1] - xywh[:, 3] / 2,
+                    xywh[:, 0] + xywh[:, 2] / 2,
+                    xywh[:, 1] + xywh[:, 3] / 2,
+                )
+            )
+            keypoints = label.get("keypoints")
+            if keypoints is not None:
+                keypoints = keypoints.astype(np.float32).copy()
+                keypoints[..., 0] *= width
+                keypoints[..., 1] *= height
+            rotated, rotated_boxes, rotated_keypoints, metadata = rotate_face_sample(
+                image,
+                boxes,
+                keypoints,
+                angle=float(angle),
+                output_shape=(output_height, output_width),
+                canvas_mode=canvas_mode,
+                border_mode=border_mode,
+                border_value=border_value,
+                drop_visible=drop_visible,
+                keep_visible=keep_visible,
+                min_face_size=min_face_size,
+            )
+            filename = f"{index:06d}__{Path(image_file).stem}__rot{int(angle) % 360:03d}.jpg"
+            image_path, label_path = image_root / filename, label_root / Path(filename).with_suffix(".txt")
+            status = metadata["status"].copy()
+            status[(label["cls"].reshape(-1) < 0) & (status > 0)] = 1
+            metadata["status"] = status
+            rows = _rotated_face_rows(
+                label["cls"].reshape(-1),
+                rotated_boxes,
+                rotated_keypoints,
+                metadata["quads"],
+                status == 2,
+                output_width,
+                output_height,
+                task == "obb",
+            )
+            if index < previews and existing != "verify":
+                preview_path = output_dir / "previews" / angle_name / filename
+                preview_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(
+                    str(preview_path),
+                    _draw_rotation_preview(rotated, rotated_boxes, rotated_keypoints, metadata),
+                )
+            label_text = "\n".join(rows) + ("\n" if rows else "")
+            encoded, image_bytes = cv2.imencode(".jpg", rotated)
+            if not encoded:
+                raise OSError(f"Unable to encode {image_path}")
+            image_bytes = image_bytes.tobytes()
+            if existing == "verify":
+                if not image_path.exists() or image_path.read_bytes() != image_bytes:
+                    raise ValueError(f"Generated image differs from existing file: {image_path}")
+                if not label_path.exists() or label_path.read_text() != label_text:
+                    raise ValueError(f"Generated labels differ from existing file: {label_path}")
+            elif existing != "skip" or not image_path.exists():
+                image_path.write_bytes(image_bytes)
+                label_path.write_text(label_text)
+
+            counts = np.bincount(status, minlength=3)
+            totals["images"] += 1
+            totals["faces"] += len(status)
+            totals["dropped"] += int(counts[0])
+            totals["ignored"] += int(counts[1])
+            totals["kept"] += int(counts[2])
+            records.append(
+                {
+                    "source_image": str(Path(image_file).resolve()),
+                    "generated_image": str(image_path.relative_to(output_dir)),
+                    "angle_deg": float(angle),
+                    "source_width": width,
+                    "source_height": height,
+                    "output_width": output_width,
+                    "output_height": output_height,
+                    "canvas_mode": canvas_mode,
+                    "border_mode": border_mode,
+                    "border_value": border_value,
+                    "matrix_total": metadata["matrix_total"].tolist(),
+                    "visible_ratio": metadata["visible_ratio"].tolist(),
+                    "num_faces_before": len(status),
+                    "num_faces_kept": int(counts[2]),
+                    "num_faces_ignored": int(counts[1]),
+                    "num_faces_dropped": int(counts[0]),
+                }
+            )
+        manifest = "\n".join(json.dumps(record, separators=(",", ":")) for record in records) + "\n"
+        manifest_path = output_dir / "val_rotation" / angle_name / "manifest.jsonl"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        if existing == "verify" and (not manifest_path.exists() or manifest_path.read_text() != manifest):
+            raise ValueError(f"Generated manifest differs from existing file: {manifest_path}")
+        if existing != "verify":
+            manifest_path.write_text(manifest)
+        totals["angle_deg"] = float(angle)
+        angle_summaries.append(totals)
+        angle_yaml = output_dir / f"{angle_name}.yaml"
+        angle_data = {
+            "path": str(output_dir.resolve()),
+            "train": f"images/val_rotation/{angle_name}",
+            "val": f"images/val_rotation/{angle_name}",
+            "names": source["names"],
+        }
+        if task == "obb":
+            angle_data["task"] = "obb"
+        if source.get("kpt_shape"):
+            angle_data.update({"kpt_shape": source["kpt_shape"], "flip_idx": source.get("flip_idx", [])})
+        if existing == "verify":
+            if not angle_yaml.exists() or YAML.load(angle_yaml) != angle_data:
+                raise ValueError(f"Generated dataset YAML differs from existing file: {angle_yaml}")
+        else:
+            YAML.save(angle_yaml, angle_data)
+        angle_yamls.append(angle_yaml)
+
+    summary = {
+        "source_data": str(Path(data).resolve()),
+        "source_split": split,
+        "task": task,
+        "imgsz": [output_height, output_width],
+        "canvas_mode": canvas_mode,
+        "border_mode": border_mode,
+        "border_value": border_value,
+        "drop_visible": drop_visible,
+        "keep_visible": keep_visible,
+        "min_face_size": min_face_size,
+        "angles": angle_summaries,
+    }
+    summary_path = output_dir / "rotation_summary.json"
+    summary_text = json.dumps(summary, indent=2) + "\n"
+    if existing == "verify" and (not summary_path.exists() or summary_path.read_text() != summary_text):
+        raise ValueError(f"Generated summary differs from existing file: {summary_path}")
+    if existing != "verify":
+        summary_path.write_text(summary_text)
+
+    yaml_path = output_dir / "rotation-val.yaml"
+    aggregate = {
+        "path": str(output_dir.resolve()),
+        "train": str(angle_yamls[0].stem).replace("angle_", "images/val_rotation/angle_"),
+        "val": [f"images/val_rotation/angle_{int(angle) % 360:03d}" for angle in angles],
+        "names": source["names"],
+        "rotation_summary": "rotation_summary.json",
+    }
+    if task == "obb":
+        aggregate["task"] = "obb"
+    if source.get("kpt_shape"):
+        aggregate.update({"kpt_shape": source["kpt_shape"], "flip_idx": source.get("flip_idx", [])})
+    if existing == "verify":
+        if not yaml_path.exists() or YAML.load(yaml_path) != aggregate:
+            raise ValueError(f"Generated dataset YAML differs from existing file: {yaml_path}")
+    else:
+        YAML.save(yaml_path, aggregate)
+    LOGGER.info(f"Generated deterministic rotation validation set at {yaml_path}")
+    return yaml_path
+
+
+def _rotated_face_rows(classes, boxes, keypoints, quads, keep, width, height, use_obb=False):
+    """Serialize kept rotated HBB and landmark targets to Ultralytics rows."""
+    rows = []
+    for index in np.flatnonzero(keep):
+        if use_obb:
+            normalized = quads[index] / np.array((width, height), dtype=np.float32)
+            values = [int(classes[index]), *normalized.reshape(-1).clip(0, 1)]
+        else:
+            x1, y1, x2, y2 = boxes[index]
+            values = [
+                int(classes[index]),
+                (x1 + x2) / (2 * width),
+                (y1 + y2) / (2 * height),
+                (x2 - x1) / width,
+                (y2 - y1) / height,
+            ]
+        if keypoints is not None:
+            for x, y, visibility in keypoints[index]:
+                values.extend(
+                    (x / width if visibility > 0 else 0, y / height if visibility > 0 else 0, int(visibility > 0))
+                )
+        rows.append(" ".join(f"{value:g}" for value in values))
+    return rows
+
+
+def _draw_rotation_preview(image, boxes, keypoints, metadata):
+    """Draw transformed quadrilaterals, HBBs, landmarks, visibility, and filtering states."""
+    preview = image.copy()
+    names = ("drop", "ignore", "keep")
+    colors = ((0, 0, 255), (0, 165, 255), (0, 255, 0))
+    for index, (box, quad, ratio, status) in enumerate(
+        zip(boxes, metadata["quads"], metadata["visible_ratio"], metadata["status"])
+    ):
+        color = colors[status]
+        cv2.polylines(preview, [quad.astype(np.int32)], True, color, 1)
+        if status:
+            x1, y1, x2, y2 = box.astype(int)
+            cv2.rectangle(preview, (x1, y1), (x2, y2), color, 1)
+            cv2.putText(
+                preview,
+                f"{names[status]} {ratio:.2f}",
+                (x1, max(y1 - 2, 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.3,
+                color,
+                1,
+            )
+        if keypoints is not None:
+            for keypoint_index, (x, y, visible) in enumerate(keypoints[index]):
+                if visible > 0:
+                    cv2.circle(preview, (round(x), round(y)), 2, color, -1)
+                    cv2.putText(
+                        preview,
+                        str(keypoint_index),
+                        (round(x) + 2, round(y)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.3,
+                        color,
+                        1,
+                    )
+    matrix = np.array2string(metadata["matrix_total"], precision=2, suppress_small=True).replace("\n", " ")
+    cv2.putText(
+        preview,
+        f"angle={metadata['angle_deg']:g} canvas={metadata['canvas_mode']} M={matrix}",
+        (5, 12),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.3,
+        (255, 255, 0),
+        1,
+    )
+    return preview
 
 
 def coco91_to_coco80_class() -> list[int]:

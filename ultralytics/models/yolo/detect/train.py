@@ -15,7 +15,7 @@ from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel
-from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK
+from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, ops
 from ultralytics.utils.patches import override_configs
 from ultralytics.utils.plotting import plot_images, plot_labels
 from ultralytics.utils.torch_utils import torch_distributed_zero_first, unwrap_model
@@ -116,13 +116,14 @@ class DetectionTrainer(BaseTrainer):
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
                 batch[k] = v.to(self.device, non_blocking=self.device.type not in {"cpu", "mps"})
-        batch["img"] = batch["img"].float() / 255
+        batch["img"] = ops.normalize_image(batch["img"].float(), self.args.input_norm)
         if self.args.multi_scale > 0.0:
             imgs = batch["img"]
+            base_imgsz = max(self.args.imgsz) if isinstance(self.args.imgsz, (list, tuple)) else self.args.imgsz
             sz = (
                 random.randrange(
-                    max(self.stride, int(self.args.imgsz * (1.0 - self.args.multi_scale))),  # min imgsz
-                    int(self.args.imgsz * (1.0 + self.args.multi_scale) + self.stride),  # max imgsz
+                    max(self.stride, int(base_imgsz * (1.0 - self.args.multi_scale))),  # min imgsz
+                    int(base_imgsz * (1.0 + self.args.multi_scale) + self.stride),  # max imgsz
                 )
                 // self.stride
                 * self.stride
@@ -142,6 +143,7 @@ class DetectionTrainer(BaseTrainer):
         # self.args.box *= 3 / nl  # scale to layers
         # self.args.cls *= self.data["nc"] / 80 * 3 / nl  # scale to classes and layers
         # self.args.cls *= (self.args.imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
+        self.args.input_norm = self.model.yaml.get("input_norm", self.args.input_norm)
         self.model.nc = self.data["nc"]  # attach number of classes to model
         self.model.names = self.data["names"]  # attach class names to model
         self.model.args = self.args  # attach hyperparameters to model

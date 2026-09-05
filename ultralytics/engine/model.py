@@ -216,6 +216,7 @@ class Model(torch.nn.Module):
         self.model = (model or self._smart_load("model"))(cfg_dict, verbose=verbose and RANK == -1)  # build model
         self.overrides["model"] = self.cfg
         self.overrides["task"] = self.task
+        self.overrides.update({k: cfg_dict[k] for k in ("imgsz", "input_norm", "rect") if k in cfg_dict})
 
         # Below added to allow export from YAMLs
         self.model.args = {**DEFAULT_CFG_DICT, **self.overrides}  # combine default and model args (prefer model args)
@@ -747,7 +748,8 @@ class Model(torch.nn.Module):
         from .exporter import Exporter, export_formats
 
         custom = {
-            "imgsz": self.model.args["imgsz"],
+            "imgsz": self.model.yaml.get("imgsz", self.model.args.get("imgsz")),
+            "opset": self.model.yaml.get("opset", self.model.args.get("opset")),
             "batch": 1,
             "data": None,
             "device": None,  # reset to avoid multi-GPU errors
@@ -1104,7 +1106,7 @@ class Model(torch.nn.Module):
             >>> print(reset_args)
             {'imgsz': 640, 'data': 'coco.yaml', 'task': 'detect'}
         """
-        include = {"imgsz", "data", "task", "single_cls"}  # only remember these arguments when loading a PyTorch model
+        include = {"imgsz", "data", "task", "single_cls", "input_norm", "rect"}
         return {k: v for k, v in args.items() if k in include}
 
     def _smart_load(self, key: str):

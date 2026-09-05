@@ -65,6 +65,16 @@ class PyTorchBackend(BaseBackend):
         self.stride = max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32
         self.names = model.module.names if hasattr(model, "module") else getattr(model, "names", {})
         self.channels = model.yaml.get("channels", 3) if hasattr(model, "yaml") else 3
+        if hasattr(model, "yaml"):
+            args = getattr(model, "args", {})
+            input_norm = (
+                args.get("input_norm", "scale_255")
+                if isinstance(args, dict)
+                else getattr(args, "input_norm", "scale_255")
+            )
+            self.input_norm = model.yaml.get("input_norm", input_norm)
+            if "imgsz" in model.yaml:
+                self.imgsz = model.yaml["imgsz"]
         model.half() if self.fp16 else model.float()
 
         for p in model.parameters():

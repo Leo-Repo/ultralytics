@@ -287,7 +287,8 @@ class BaseTrainer:
             self.data["train"], batch_size=batch_size, rank=LOCAL_RANK, mode="train"
         )
         final_batch_size = len(self.train_loader.sampler) % self.train_loader.batch_size or self.train_loader.batch_size
-        if self.args.imgsz < 2 * self.stride and not self.train_loader.drop_last and final_batch_size == 1:
+        min_imgsz = min(self.args.imgsz) if isinstance(self.args.imgsz, (list, tuple)) else self.args.imgsz
+        if min_imgsz < 2 * self.stride and not self.train_loader.drop_last and final_batch_size == 1:
             raise ValueError(
                 f"final batch=1 training at imgsz={self.args.imgsz} gives BatchNorm a single value per channel; "
                 f"change batch or use imgsz >= {2 * self.stride}"
@@ -383,7 +384,7 @@ class BaseTrainer:
             )
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
-        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
+        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=2)
         self.stride = gs  # for multiscale training
 
         # resume training would directly load DistillationModel so check here
@@ -655,7 +656,8 @@ class BaseTrainer:
     def auto_batch(self, max_num_obj=0, dataset_size=0):
         """Calculate optimal batch size based on model and device memory constraints."""
         # Stride-aligned to match the true multi-scale max size; pyramid heads require stride-multiple inputs
-        max_imgsz = math.ceil(self.args.imgsz * (1 + self.args.multi_scale) / self.stride) * self.stride
+        imgsz = max(self.args.imgsz) if isinstance(self.args.imgsz, (list, tuple)) else self.args.imgsz
+        max_imgsz = math.ceil(imgsz * (1 + self.args.multi_scale) / self.stride) * self.stride
         return check_train_batch_size(
             model=self.model,
             imgsz=max_imgsz,

@@ -12,6 +12,22 @@ keywords: Ultralytics, data conversion, YOLO models, COCO, DOTA, YOLO bbox2segme
 
 <br>
 
+## ::: ultralytics.data.converter.convert_retinaface
+
+<br><br><hr><br>
+
+## ::: ultralytics.data.converter.generate_rotated_face_val
+
+<br><br><hr><br>
+
+## ::: ultralytics.data.converter._rotated_face_rows
+
+<br><br><hr><br>
+
+## ::: ultralytics.data.converter._draw_rotation_preview
+
+<br><br><hr><br>
+
 ## ::: ultralytics.data.converter.coco91_to_coco80_class
 
 <br><br><hr><br>

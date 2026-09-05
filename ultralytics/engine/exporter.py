@@ -856,6 +856,8 @@ class Exporter:
             from ultralytics.utils.export.executorch import executorch_wrapper
 
             model = executorch_wrapper(model)
+        from ultralytics.models.scrfd.modules import SCRFDHead
+
         for m in model.modules():
             if isinstance(m, Attention) and fmt == "coreml" and self.args.format.lower() != "mlmodel":
                 m.format = fmt
@@ -869,6 +871,9 @@ class Exporter:
                     m.bake_argmax = check_version(f"tensorrt-cu{cuda_major}", ">=10.0.0") or check_version(
                         "tensorrt", ">=10.0.0"
                     )
+            if isinstance(m, SCRFDHead):
+                m.export = True
+                m.format = self.args.format
             if isinstance(m, (Detect, RTDETRDecoder)):  # includes all Detect subclasses like Segment, Pose, OBB
                 m.dynamic = self.args.dynamic
                 m.export = True
@@ -932,6 +937,7 @@ class Exporter:
             "names": model.names,
             "args": {k: str(v) if isinstance(v, Path) else v for k, v in self.args if k in fmt_keys},
             "channels": model.yaml.get("channels", 3),
+            "input_norm": model.yaml.get("input_norm", self.args.input_norm),
             "end2end": getattr(model, "end2end", False),
         }  # model metadata
         if self.dla is not None:
@@ -960,17 +966,11 @@ class Exporter:
         # Finish
         if f:
             square = self.imgsz[0] == self.imgsz[1]
-            s = (
-                ""
-                if square
-                else f"WARNING ⚠️ non-PyTorch val requires square images, 'imgsz={self.imgsz}' will not "
-                f"work. Use export 'imgsz={max(self.imgsz)}' if val is required."
-            )
             imgsz = self.imgsz[0] if square else str(self.imgsz)[1:-1].replace(" ", "")
             q = "quantize=16" if self.args.quantize == 16 else ""  # FP16 inference flag for the val/predict hint
             inference_commands = (
                 f"\nPredict:         yolo predict task={model.task} model={f} imgsz={imgsz} {q}"
-                f"\nValidate:        yolo val task={model.task} model={f} imgsz={imgsz} data={data} {q} {s}"
+                f"\nValidate:        yolo val task={model.task} model={f} imgsz={imgsz} data={data} {q}"
                 if fmt in AutoBackend._BACKEND_MAP
                 else ""
             )

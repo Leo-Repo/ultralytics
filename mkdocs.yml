@@ -707,6 +707,14 @@ nav:
                   - text_encoder_ve: reference/models/sam/sam3/text_encoder_ve.md
                   - vitdet: reference/models/sam/sam3/vitdet.md
                   - vl_combiner: reference/models/sam/sam3/vl_combiner.md
+          - scrfd:
+              - data: reference/models/scrfd/data.md
+              - loss: reference/models/scrfd/loss.md
+              - model: reference/models/scrfd/model.md
+              - modules: reference/models/scrfd/modules.md
+              - predict: reference/models/scrfd/predict.md
+              - train: reference/models/scrfd/train.md
+              - val: reference/models/scrfd/val.md
           - utils:
               - loss: reference/models/utils/loss.md
               - ops: reference/models/utils/ops.md
