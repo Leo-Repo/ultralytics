@@ -77,3 +77,66 @@ python tools/inspect_onnx_ops.py path/to/best.onnx --check --allow-sigmoid '^/mo
 
 The model has no attention Softmax. Sigmoid remains only in confidence decoding/post-processing and is intentionally
 outside the feature-network restriction.
+
+## SCRFD HBB and five-landmark path
+
+SCRFD provides a second route for 360-degree face detection. It keeps horizontal bounding boxes and standard NMS while
+using five facial landmarks as auxiliary supervision. Rotation changes only the input and labels; it does not add an
+angle head or rotated NMS.
+
+Enable online full-angle training with `degrees=180`. Set `degrees=0` to disable roll rotation. The image, all four HBB
+corners, and valid landmarks share one affine matrix. The transformed corners produce a new enclosing HBB, landmarks
+outside the canvas lose visibility, and partially visible faces are excluded from both positive and negative SCRFD
+classification targets.
+
+```python
+from ultralytics import SCRFD
+
+model = SCRFD("scrfd-500m-kps.yaml")
+model.train(data="retinaface.yaml", imgsz=640, degrees=180, epochs=640)
+```
+
+The default online distribution uses 80% samples from the full configured range and 20% from ±15 degrees. It uses a
+70/30 mixture of fixed-canvas and expanded-canvas rotation. Configure these dataset-owned settings in the data YAML:
+
+```yaml
+scrfd_rotation:
+    full_probability: 0.8
+    small_degrees: 15.0
+    expand_probability: 0.3
+    border_modes: [constant, reflect, random]
+    border_value: 114
+    drop_visible: 0.3
+    keep_visible: 0.6
+    min_face_size: 2.0
+```
+
+Training randomness follows the Ultralytics `seed` and `deterministic` settings. Rotation is applied before the native
+SCRFD random square crop and resize. Other SCRFD augmentation remains active when `degrees=0`.
+
+### Deterministic rotation validation
+
+Keep the native validation split unchanged, then generate a separate fixed-angle validation dataset. Generate the
+default twelve 30-degree buckets at 640×640 with:
+
+```bash
+python tools/scrfd_rotation_val.py generate \
+    --data retinaface.yaml \
+    --output datasets/retinaface-rotation-val \
+    --imgsz 640 640
+```
+
+The output includes synchronized Ultralytics HBB/KPS labels, one JSONL manifest and YAML per angle, an aggregate YAML,
+and filtering statistics. Re-run with `--existing verify` to byte-check deterministic images, labels, and manifests.
+Use `--canvas-mode expand_letterbox` for the alternate canvas strategy.
+
+Evaluate native and rotated validation separately. The angle evaluator reports each angle, the aggregate metrics,
+worst-angle recall, and recall range:
+
+```bash
+python tools/scrfd_rotation_val.py evaluate \
+    --model path/to/best.pt \
+    --data datasets/retinaface-rotation-val \
+    --output runs/scrfd-rotation-val \
+    --imgsz 640
+```

@@ -47,9 +47,11 @@ class SCRFDCriterion:
         for batch_index in range(len(batch["img"])):
             mask = batch["batch_idx"].view(-1).long() == batch_index
             scale = batch["bboxes"].new_tensor((image_size[1], image_size[0], image_size[1], image_size[0]))
-            gt_boxes = xywh2xyxy(batch["bboxes"][mask] * scale)
+            classes = batch["cls"][mask].view(-1)
+            boxes = xywh2xyxy(batch["bboxes"][mask] * scale)
+            gt_boxes, ignored_boxes = boxes[classes >= 0], boxes[classes < 0]
             if self.use_kps:
-                gt_kps = batch["keypoints"][mask].clone()
+                gt_kps = batch["keypoints"][mask][classes >= 0].clone()
                 if len(gt_kps):
                     gt_kps[..., 0] *= image_size[1]
                     gt_kps[..., 1] *= image_size[0]
@@ -57,6 +59,16 @@ class SCRFDCriterion:
             positive = assigned >= 0
             labels = torch.ones(len(flat_anchors), dtype=torch.long, device=flat_anchors.device)
             labels[positive] = 0
+            if len(ignored_boxes):
+                centers = (flat_anchors[:, :2] + flat_anchors[:, 2:]) / 2
+                ignored = (
+                    torch.cat(
+                        (centers[:, None] - ignored_boxes[None, :, :2], ignored_boxes[None, :, 2:] - centers[:, None]),
+                        -1,
+                    ).amin(-1)
+                    > 0
+                ).any(1)
+                labels[ignored & ~positive] = -1
             targets = torch.zeros_like(flat_anchors)
             kps_targets = flat_anchors.new_zeros((len(flat_anchors), 10)) if self.use_kps else None
             kps_weights = flat_anchors.new_zeros((len(flat_anchors), 10)) if self.use_kps else None
@@ -123,7 +135,7 @@ class SCRFDCriterion:
                     F.binary_cross_entropy_with_logits(cls.squeeze(-1)[positive], q, reduction="none")
                     * (q - pred_sigmoid[positive]).abs().square()
                 )
-            cls_loss += qfl.sum() / num_pos
+            cls_loss += qfl[level_labels >= 0].sum() / num_pos
             offset += count
         normalizer = _reduce_mean(weight_sum).clamp(min=1e-6)
         losses = {"cls_loss": cls_loss, "box_loss": box_loss / normalizer}

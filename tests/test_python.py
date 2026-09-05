@@ -139,6 +139,95 @@ def test_face_obb_rectangular_train_and_val_shapes(tmp_path):
     assert val_item["img"].shape == (3, 192, 320) and val_item["bboxes"].shape == (1, 5)
 
 
+def test_scrfd_roll_geometry_and_disable():
+    """SCRFD roll must share one matrix across pixels, HBB corners, and valid landmarks."""
+    from ultralytics.models.scrfd.data import SCRFDRandomRoll, rotate_face_sample
+    from ultralytics.utils.instance import Instances
+
+    image = np.zeros((60, 100, 3), dtype=np.uint8)
+    boxes = np.array([[30, 20, 70, 40]], dtype=np.float32)
+    keypoints = np.array([[[60, 30, 1], [0, 0, 0]]], dtype=np.float32)
+    _, rotated_boxes, rotated_keypoints, metadata = rotate_face_sample(image, boxes, keypoints, angle=90)
+    assert np.allclose(rotated_boxes[0], [40, 10, 60, 50])
+    assert np.allclose(rotated_keypoints[0, 0], [50, 20, 1])
+    assert np.array_equal(rotated_keypoints[0, 1], [0, 0, 0])
+    quad = metadata["quads"][0]
+    assert (quad >= rotated_boxes[0, :2]).all() and (quad <= rotated_boxes[0, 2:]).all()
+
+    labels = {
+        "img": image,
+        "cls": np.array([[0]], dtype=np.float32),
+        "instances": Instances(boxes.copy(), np.zeros((1, 1000, 2)), keypoints.copy(), bbox_format="xyxy"),
+    }
+    assert SCRFDRandomRoll(0, {})(labels) is labels
+
+
+def test_scrfd_rotation_val_is_deterministic(tmp_path):
+    """Fixed-angle validation generation must reproduce byte-identical images, labels, and manifests."""
+    from ultralytics.data.converter import generate_rotated_face_val
+
+    root = tmp_path / "source"
+    (root / "images" / "val").mkdir(parents=True)
+    (root / "labels" / "val").mkdir(parents=True)
+    image = np.zeros((60, 100, 3), dtype=np.uint8)
+    image[20:40, 30:70] = 255
+    cv2.imwrite(str(root / "images" / "val" / "face.jpg"), image)
+    (root / "labels" / "val" / "face.txt").write_text(
+        "0 0.5 0.5 0.4 0.333333 0.4 0.45 1 0.6 0.45 1 0.5 0.5 1 0.43 0.57 1 0.57 0.57 1\n"
+    )
+    data = root / "face.yaml"
+    data.write_text(
+        f"path: {root}\ntrain: images/val\nval: images/val\nnames: {{0: face}}\nkpt_shape: [5, 3]\n"
+        "flip_idx: [1, 0, 2, 4, 3]\n"
+    )
+    output = tmp_path / "rotation"
+    generated = generate_rotated_face_val(data, output, angles=(0, 90), imgsz=(64, 64))
+    generate_rotated_face_val(data, output, angles=(0, 90), imgsz=(64, 64), existing="verify")
+    assert generated.is_file()
+    assert len(list((output / "images" / "val_rotation").rglob("*.jpg"))) == 2
+    from ultralytics.data.utils import check_det_dataset
+    from ultralytics.models.scrfd.data import build_scrfd_dataset
+
+    rotation_data = check_det_dataset(str(generated))
+    cfg = get_cfg(overrides={"task": "pose", "imgsz": 64, "rect": True})
+    dataset = build_scrfd_dataset(cfg, rotation_data["val"], 1, rotation_data, mode="val", rect=True)
+    assert dataset[0]["img"].shape == (3, 64, 64)
+
+
+@pytest.mark.parametrize("name", ("500m", "1g", "2.5g", "10g", "34g", "500m-kps", "2.5g-kps", "10g-kps"))
+def test_scrfd_variants_forward(name):
+    """Every supported official SCRFD scale must construct and decode its expected prediction channels."""
+    from ultralytics import SCRFD
+
+    output = SCRFD(f"scrfd-{name}.yaml").model.eval()(torch.zeros(1, 3, 64, 64))[0]
+    assert output.shape == (1, 20 if name.endswith("kps") else 5, 168)
+    assert torch.isfinite(output).all()
+
+
+def test_scrfd_loss_accepts_ignored_rotation_targets():
+    """Partially visible roll targets must neither break assignment nor produce non-finite gradients."""
+    from ultralytics import SCRFD
+
+    model = SCRFD("scrfd-500m-kps.yaml").model
+    model.args = get_cfg(overrides={"task": "pose"})
+    model.train()
+    batch = {
+        "img": torch.rand(1, 3, 64, 64),
+        "batch_idx": torch.tensor([0, 0]),
+        "cls": torch.tensor([[0.0], [-1.0]]),
+        "bboxes": torch.tensor([[0.5, 0.5, 0.3, 0.3], [0.8, 0.8, 0.2, 0.2]]),
+        "keypoints": torch.tensor(
+            [
+                [[0.45, 0.45, 1], [0.55, 0.45, 1], [0.5, 0.5, 1], [0.46, 0.55, 1], [0.54, 0.55, 1]],
+                [[0.75, 0.75, 0], [0.85, 0.75, 0], [0.8, 0.8, 0], [0.76, 0.85, 0], [0.84, 0.85, 0]],
+            ]
+        ),
+    }
+    loss, items = model(batch)
+    assert torch.isfinite(loss).all() and all(torch.isfinite(item) for item in items.values())
+    loss.sum().backward()
+
+
 def test_face_obb_normalization_paths():
     """Trainer, Validator, and Predictor must share centered RGB normalization without changing the default mode."""
     from types import SimpleNamespace
